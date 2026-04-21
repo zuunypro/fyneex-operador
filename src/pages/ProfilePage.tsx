@@ -35,7 +35,7 @@ const UPDATE_ID = safeString(() => (Updates.updateId || '').slice(0, 8), '—')
 
 export function ProfilePage() {
   const user = useUserStore((s) => s.user)
-  const logout = useNavigationStore((s) => s.logout)
+  const doLogout = useNavigationStore((s) => s.logout)
   const event = useNavigationStore((s) => s.selectedEvent)
   const packets = useOfflineStore((s) => s.packets)
   const queue = useOfflineStore((s) => s.queue)
@@ -46,6 +46,7 @@ export function ProfilePage() {
   const syncNow = useOfflineStore((s) => s.syncNow)
   const retryAction = useOfflineStore((s) => s.retryAction)
   const dropAction = useOfflineStore((s) => s.dropAction)
+  const wipeAll = useOfflineStore((s) => s.wipeAll)
   const syncing = useOfflineStore((s) => s.syncing)
 
   const [checking, setChecking] = useState(false)
@@ -138,6 +139,31 @@ export function ProfilePage() {
       Alert.alert('Sync parcial', `${res.synced} OK, ${res.failed} falharam. Tente de novo.`)
     } else if (res.synced > 0) {
       Alert.alert('Sincronizado', `${res.synced} escaneamento${res.synced === 1 ? '' : 's'} enviado${res.synced === 1 ? '' : 's'}.`)
+    }
+  }
+
+  // Wrapper do logout — se tiver items pendentes, avisa que vão ser perdidos.
+  // Evita que user A deixe items pra ser sincronizados com token do user B.
+  async function handleLogout() {
+    if (pending > 0) {
+      Alert.alert(
+        'Sair sem sincronizar?',
+        `${pending} escaneamento${pending === 1 ? '' : 's'} pendente${pending === 1 ? '' : 's'} será${pending === 1 ? '' : 'ão'} descartado${pending === 1 ? '' : 's'}. Sincronize antes se for importante.`,
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: 'Sair mesmo assim',
+            style: 'destructive',
+            onPress: async () => {
+              await wipeAll()
+              await doLogout()
+            },
+          },
+        ],
+      )
+    } else {
+      await wipeAll()
+      await doLogout()
     }
   }
 
@@ -353,7 +379,7 @@ export function ProfilePage() {
           </Pressable>
         </View>
 
-        <Pressable onPress={logout} style={styles.logoutButton}>
+        <Pressable onPress={handleLogout} style={styles.logoutButton}>
           <View style={styles.logoutLeft}>
             <View style={styles.logoutIconBox}>
               <Icon name="logout" size={20} color={colors.accentRed} />

@@ -64,19 +64,53 @@ function uid(): string {
   )
 }
 
+/**
+ * Mutex in-memory que serializa operações read-modify-write em AsyncStorage.
+ * Sem isso, scans rápidos offline podiam perder mutations porque o segundo
+ * write sobrescrevia a versão desatualizada lida antes do primeiro terminar.
+ * Todos os helpers abaixo que tocam packet/queue usam `withLock`.
+ */
+let lockChain: Promise<unknown> = Promise.resolve()
+async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = lockChain
+  let release!: () => void
+  const next = new Promise<void>((r) => { release = r })
+  lockChain = next
+  try {
+    await prev
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
 /* ── Packets (snapshots) ────────────────────────────────────────────────── */
 
 export async function savePacket(packet: EventPacket): Promise<void> {
-  await AsyncStorage.setItem(KEY_PACKET(packet.eventId), JSON.stringify(packet))
-  const idx = await loadIndex()
-  const next = idx.filter((m) => m.eventId !== packet.eventId)
-  next.push({
-    eventId: packet.eventId,
-    downloadedAt: packet.downloadedAt,
-    participantCount: packet.participants.length,
-    itemCount: packet.inventory.items.length,
+  return withLock(async () => {
+    await AsyncStorage.setItem(KEY_PACKET(packet.eventId), JSON.stringify(packet))
+    const idx = await loadIndexInternal()
+    const next = idx.filter((m) => m.eventId !== packet.eventId)
+    next.push({
+      eventId: packet.eventId,
+      downloadedAt: packet.downloadedAt,
+      participantCount: packet.participants.length,
+      itemCount: packet.inventory.items.length,
+    })
+    await AsyncStorage.setItem(KEY_INDEX, JSON.stringify(next))
   })
-  await AsyncStorage.setItem(KEY_INDEX, JSON.stringify(next))
+}
+
+async function loadIndexInternal(): Promise<PacketMeta[]> {
+  try {
+    const raw = await AsyncStorage.getItem(KEY_INDEX)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed as PacketMeta[]
+  } catch {
+    return []
+  }
 }
 
 export async function loadPacket(eventId: string): Promise<EventPacket | null> {
@@ -90,35 +124,31 @@ export async function loadPacket(eventId: string): Promise<EventPacket | null> {
 }
 
 export async function loadIndex(): Promise<PacketMeta[]> {
-  try {
-    const raw = await AsyncStorage.getItem(KEY_INDEX)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed as PacketMeta[]
-  } catch {
-    return []
-  }
+  return loadIndexInternal()
 }
 
 export async function removePacket(eventId: string): Promise<void> {
-  await AsyncStorage.removeItem(KEY_PACKET(eventId))
-  const idx = await loadIndex()
-  await AsyncStorage.setItem(
-    KEY_INDEX,
-    JSON.stringify(idx.filter((m) => m.eventId !== eventId)),
-  )
+  return withLock(async () => {
+    await AsyncStorage.removeItem(KEY_PACKET(eventId))
+    const idx = await loadIndexInternal()
+    await AsyncStorage.setItem(
+      KEY_INDEX,
+      JSON.stringify(idx.filter((m) => m.eventId !== eventId)),
+    )
+  })
 }
 
 export async function wipePackets(): Promise<void> {
-  const idx = await loadIndex()
-  await Promise.all(idx.map((m) => AsyncStorage.removeItem(KEY_PACKET(m.eventId))))
-  await AsyncStorage.removeItem(KEY_INDEX)
+  return withLock(async () => {
+    const idx = await loadIndexInternal()
+    await Promise.all(idx.map((m) => AsyncStorage.removeItem(KEY_PACKET(m.eventId))))
+    await AsyncStorage.removeItem(KEY_INDEX)
+  })
 }
 
 /* ── Queue (mutations offline) ──────────────────────────────────────────── */
 
-export async function loadQueue(): Promise<PendingAction[]> {
+async function loadQueueInternal(): Promise<PendingAction[]> {
   try {
     const raw = await AsyncStorage.getItem(KEY_QUEUE)
     if (!raw) return []
@@ -130,6 +160,10 @@ export async function loadQueue(): Promise<PendingAction[]> {
   }
 }
 
+export async function loadQueue(): Promise<PendingAction[]> {
+  return loadQueueInternal()
+}
+
 async function saveQueue(queue: PendingAction[]): Promise<void> {
   await AsyncStorage.setItem(KEY_QUEUE, JSON.stringify(queue))
 }
@@ -137,35 +171,50 @@ async function saveQueue(queue: PendingAction[]): Promise<void> {
 export async function enqueue(
   action: Omit<PendingAction, 'id' | 'createdAt' | 'status' | 'attempts'>,
 ): Promise<PendingAction> {
-  const queue = await loadQueue()
-  const entry: PendingAction = {
-    ...action,
-    id: uid(),
-    createdAt: new Date().toISOString(),
-    status: 'pending',
-    attempts: 0,
-  }
-  queue.push(entry)
-  await saveQueue(queue)
-  return entry
+  return withLock(async () => {
+    const queue = await loadQueueInternal()
+    const entry: PendingAction = {
+      ...action,
+      id: uid(),
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+      attempts: 0,
+    }
+    queue.push(entry)
+    await saveQueue(queue)
+    return entry
+  })
 }
 
 export async function updateQueueItem(
   id: string,
   patch: Partial<PendingAction>,
 ): Promise<void> {
-  const queue = await loadQueue()
-  const next = queue.map((q) => (q.id === id ? { ...q, ...patch } : q))
-  await saveQueue(next)
+  return withLock(async () => {
+    const queue = await loadQueueInternal()
+    const next = queue.map((q) => (q.id === id ? { ...q, ...patch } : q))
+    await saveQueue(next)
+  })
 }
 
 export async function removeFromQueue(id: string): Promise<void> {
-  const queue = await loadQueue()
-  await saveQueue(queue.filter((q) => q.id !== id))
+  return withLock(async () => {
+    const queue = await loadQueueInternal()
+    await saveQueue(queue.filter((q) => q.id !== id))
+  })
+}
+
+export async function removeFromQueueByEvent(eventId: string): Promise<void> {
+  return withLock(async () => {
+    const queue = await loadQueueInternal()
+    await saveQueue(queue.filter((q) => q.eventId !== eventId))
+  })
 }
 
 export async function clearQueue(): Promise<void> {
-  await AsyncStorage.removeItem(KEY_QUEUE)
+  return withLock(async () => {
+    await AsyncStorage.removeItem(KEY_QUEUE)
+  })
 }
 
 /* ── Packet update helpers (manter cache fresco com mutations) ─────────── */
@@ -182,12 +231,23 @@ export async function patchParticipantInPacket(
   instanceIndex: number | undefined,
   patch: Partial<MobileParticipant>,
 ): Promise<void> {
-  const packet = await loadPacket(eventId)
-  if (!packet) return
-  const next = packet.participants.map((p) => {
-    if (p.participantId !== participantId) return p
-    if (instanceIndex !== undefined && p.instanceIndex !== instanceIndex) return p
-    return { ...p, ...patch }
+  return withLock(async () => {
+    const raw = await AsyncStorage.getItem(KEY_PACKET(eventId))
+    if (!raw) return
+    let packet: EventPacket
+    try {
+      packet = JSON.parse(raw) as EventPacket
+    } catch {
+      return
+    }
+    const next = packet.participants.map((p) => {
+      if (p.participantId !== participantId) return p
+      if (instanceIndex !== undefined && p.instanceIndex !== instanceIndex) return p
+      return { ...p, ...patch }
+    })
+    await AsyncStorage.setItem(
+      KEY_PACKET(eventId),
+      JSON.stringify({ ...packet, participants: next }),
+    )
   })
-  await savePacket({ ...packet, participants: next })
 }

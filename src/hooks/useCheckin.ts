@@ -58,12 +58,9 @@ export function useCheckin() {
 
       const isOnline = useOfflineStore.getState().online !== false
       if (!isOnline) {
-        await patchParticipantInPacket(
-          data.eventId,
-          data.participantId,
-          data.instanceIndex,
-          { status: 'checked', checkedInAt: new Date().toISOString() },
-        )
+        // enqueue ANTES do patch: se enqueue falhar por algum motivo (quota,
+        // storage bloqueado), não deixamos a UI mentindo "entregue" sem o
+        // servidor jamais ser avisado.
         await enqueue({
           type: 'checkin',
           eventId: data.eventId,
@@ -71,6 +68,12 @@ export function useCheckin() {
           instanceIndex: data.instanceIndex,
           observation: payload.observation,
         })
+        await patchParticipantInPacket(
+          data.eventId,
+          data.participantId,
+          data.instanceIndex,
+          { status: 'checked', checkedInAt: new Date().toISOString() },
+        )
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }

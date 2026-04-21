@@ -50,15 +50,15 @@ export function useRevertCheckin() {
 
       const isOnline = useOfflineStore.getState().online !== false
       if (!isOnline) {
-        await patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
-          status: 'pending',
-          checkedInAt: null,
-        })
         await enqueue({
           type: 'revert-checkin',
           eventId: data.eventId,
           participantId: data.participantId,
           instanceIndex: data.instanceIndex,
+        })
+        await patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
+          status: 'pending',
+          checkedInAt: null,
         })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }

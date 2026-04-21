@@ -14,13 +14,16 @@ import { apiGet, apiPost, ApiError } from '@/services/api'
 import type { MobileParticipant } from '@/hooks/useParticipants'
 import type { InventoryItem, InventoryStats } from '@/hooks/useInventory'
 import {
+  clearQueue,
   loadIndex,
   loadQueue,
   loadPacket,
   removeFromQueue,
+  removeFromQueueByEvent,
   removePacket,
   savePacket,
   updateQueueItem,
+  wipePackets,
   type PacketMeta,
   type PendingAction,
 } from '@/services/offline'
@@ -59,9 +62,13 @@ interface OfflineState {
     eventId: string,
     onProgress?: (p: DownloadProgress) => void,
   ) => Promise<PacketMeta>
-  /** Remove o packet baixado (libera espaço). */
+  /** Remove o packet baixado (libera espaço). Limpa tbm items da fila do evento. */
   deleteEvent: (eventId: string) => Promise<void>
+  /** Apaga tudo — packets + fila + reseta estado. Usado no logout. */
+  wipeAll: () => Promise<void>
 }
+
+const MAX_AUTO_ATTEMPTS = 3
 
 const ACTION_TIMEOUT_MS = 15_000
 
@@ -149,11 +156,20 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     set({ packets, queue })
 
     // Primeira leitura do NetInfo.
+    let initialOnline = true
     try {
       const first = await NetInfo.fetch()
-      set({ online: first.isInternetReachable !== false && first.isConnected !== false })
+      initialOnline = first.isInternetReachable !== false && first.isConnected !== false
     } catch {
-      set({ online: true })
+      initialOnline = true
+    }
+    set({ online: initialOnline })
+
+    // BUG corrigido: se o app abrir JÁ online e com fila pendente (operador
+    // fechou+abriu com net ativa), o listener não dispara "transição online"
+    // porque nunca houve offline→online nesta sessão. Disparamos na mão aqui.
+    if (initialOnline && queue.some((q) => q.status !== 'synced')) {
+      setTimeout(() => void get().syncNow(), 500)
     }
 
     // Subscribe (guarda unsub pra evitar duplicar listeners em HMR).
@@ -162,9 +178,10 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
       const isOnline = st.isInternetReachable !== false && st.isConnected !== false
       const prev = get().online
       set({ online: isOnline })
-      // Voltou online E tem fila → tenta drenar.
-      if (isOnline && !prev && get().queue.length > 0) {
-        void get().syncNow()
+      // Voltou online E tem fila → tenta drenar. Delay de 1.5s pra dar tempo
+      // da rede estabilizar (DNS, handshake) — evita falha em rajada.
+      if (isOnline && prev === false && get().queue.length > 0) {
+        setTimeout(() => void get().syncNow(), 1500)
       }
     })
   },
@@ -175,7 +192,8 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
   },
 
   retryAction: async (id) => {
-    await updateQueueItem(id, { status: 'pending', error: undefined })
+    // Reset attempts=0 pra voltar a ser elegível pelo auto-sync também.
+    await updateQueueItem(id, { status: 'pending', error: undefined, attempts: 0 })
     await get().refreshState()
     if (get().online !== false) await get().syncNow()
   },
@@ -257,7 +275,15 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
 
   deleteEvent: async (eventId) => {
     await removePacket(eventId)
+    // Se tinha items da queue desse evento, limpa junto — sem o packet não
+    // temos o contexto pra mostrar no painel nem pra operador autenticar.
+    await removeFromQueueByEvent(eventId)
     await get().refreshState()
+  },
+
+  wipeAll: async () => {
+    await Promise.all([wipePackets(), clearQueue()])
+    set({ packets: [], queue: [], lastSync: null })
   },
 
   syncNow: async () => {
@@ -266,7 +292,10 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     if (state.online === false) return { synced: 0, failed: 0 }
 
     const queue = await loadQueue()
-    const pending = queue.filter((q) => q.status !== 'synced')
+    // Auto-sync só tenta items que nunca falharam OU que falharam menos de
+    // MAX_AUTO_ATTEMPTS vezes. Depois disso, só vai pelo retry manual no
+    // painel "Erros de sync" (que reseta attempts pra 0 via retryAction).
+    const pending = queue.filter((q) => q.status !== 'synced' && q.attempts < MAX_AUTO_ATTEMPTS)
     if (pending.length === 0) {
       set({ queue })
       return { synced: 0, failed: 0 }

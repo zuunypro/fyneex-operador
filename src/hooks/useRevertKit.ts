@@ -36,13 +36,13 @@ export function useRevertKit() {
     mutationFn: async (data: RevertKitPayload) => {
       const isOnline = useOfflineStore.getState().online !== false
       if (!isOnline) {
-        await patchParticipantInPacket(data.eventId, data.participantId, undefined, {
-          kitWithdrawnAt: null,
-        })
         await enqueue({
           type: 'revert-kit',
           eventId: data.eventId,
           participantId: data.participantId,
+        })
+        await patchParticipantInPacket(data.eventId, data.participantId, undefined, {
+          kitWithdrawnAt: null,
         })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
