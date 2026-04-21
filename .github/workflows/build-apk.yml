@@ -5,11 +5,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Android APK (debug)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -30,6 +33,16 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Install deps
         run: npm ci
 
@@ -40,7 +53,7 @@ jobs:
         run: |
           cd android
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleDebug --no-daemon --parallel -x lint -x test
 
       - name: Rename APK with version
         id: rename
@@ -64,11 +77,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.rename.outputs.version }}-${{ github.run_number }}
-          name: APK v${{ steps.rename.outputs.version }} build #${{ github.run_number }}
+          name: APK v${{ steps.rename.outputs.version }} build ${{ github.run_number }}
           body: |
             APK gerado automaticamente pelo commit `${{ github.sha }}`.
 
-            **Baixe o .apk abaixo**, abra no Chrome do celular, permita instalar de fonte desconhecida, instala por cima do anterior.
+            **Baixe o .apk abaixo**, abra no Chrome do celular, permita instalar de fonte desconhecida, instale por cima do anterior.
           files: android/app/build/outputs/apk/debug/${{ steps.rename.outputs.apk_name }}
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
