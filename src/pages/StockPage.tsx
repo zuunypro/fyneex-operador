@@ -11,6 +11,7 @@ import {
 } from 'react-native'
 import { colors, font, radius } from '@/theme'
 import { ApiError } from '@/services/api'
+import { friendlyError } from '@/utils/errorMessages'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useParticipants, type MobileParticipant } from '@/hooks/useParticipants'
 import { useKitWithdrawal } from '@/hooks/useKitWithdrawal'
@@ -121,10 +122,8 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Kit já havia sido retirado', 'success')
-      } else if (err instanceof ApiError) {
-        showToast(err.message, 'error')
       } else {
-        showToast('Erro ao entregar kit', 'error')
+        showToast(friendlyError(err, 'Erro ao entregar kit'), 'error')
       }
     }
   }
@@ -140,10 +139,8 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Nenhuma retirada para reverter', 'success')
-      } else if (err instanceof ApiError) {
-        showToast(err.message, 'error')
       } else {
-        showToast('Erro ao reverter retirada', 'error')
+        showToast(friendlyError(err, 'Erro ao reverter retirada'), 'error')
       }
     }
   }
@@ -186,10 +183,8 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Kit já havia sido retirado', 'success')
-      } else if (err instanceof ApiError) {
-        showToast(err.message, 'error')
       } else {
-        showToast('Erro ao entregar kit', 'error')
+        showToast(friendlyError(err, 'Erro ao entregar kit'), 'error')
       }
     }
   }
@@ -208,8 +203,7 @@ export function StockPage() {
         else showToast('Kit entregue', 'success')
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) showToast('Kit já retirado', 'success')
-        else if (err instanceof ApiError) { feedbackBad(); showToast(err.message, 'error') }
-        else { feedbackBad(); showToast('Erro ao entregar kit', 'error') }
+        else { feedbackBad(); showToast(friendlyError(err, 'Erro ao entregar kit'), 'error') }
       }
       return
     }
@@ -240,8 +234,7 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast(`${target.name} já retirou`, 'success')
-      } else if (err instanceof ApiError) { feedbackBad(); showToast(err.message, 'error') }
-      else { feedbackBad(); showToast('Erro ao entregar kit', 'error') }
+      } else { feedbackBad(); showToast(friendlyError(err, 'Erro ao entregar kit'), 'error') }
     }
   }, [participants, withdrawMutation, event.id, isDelivered, showToast])
 
@@ -598,6 +591,11 @@ const KitRow = memo(function KitRow({
                 </Text>
               </View>
             ) : null}
+            {p.nameFromForm === false ? (
+              <View style={styles.buyerFallbackBadge}>
+                <Text style={styles.buyerFallbackLabel}>comprador</Text>
+              </View>
+            ) : null}
           </View>
           <Text style={styles.rowMetaText} numberOfLines={1}>
             {group ? `${group.pos}/${group.total} · ` : ''}{p.orderNumber} · {p.category}
@@ -949,6 +947,21 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: font.weight.extrabold,
     color: '#79B8FF',
+  },
+  buyerFallbackBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.sm,
+    backgroundColor: '#2A1F12',
+    borderWidth: 1,
+    borderColor: '#4B3012',
+  },
+  buyerFallbackLabel: {
+    fontSize: 9,
+    fontWeight: font.weight.extrabold,
+    color: colors.accentOrange,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
   rowMetaText: {
     fontSize: 11,

@@ -29,6 +29,9 @@ export interface MobileParticipant {
   buyerEmail?: string
   hasKit?: boolean
   kitWithdrawnAt?: string | null
+  /** true = nome veio do formulário pós-compra; false/undefined = fallback
+   * pro nome do comprador (form não foi preenchido pelo participante). */
+  nameFromForm?: boolean
 }
 
 interface ParticipantsResponse {

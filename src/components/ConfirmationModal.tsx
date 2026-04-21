@@ -100,6 +100,15 @@ export function ConfirmationModal({
               </View>
             </View>
 
+            {visibleFields.length === 0 && p.nameFromForm === false && !alreadyScanned ? (
+              <View style={styles.formPendingBox}>
+                <Icon name="priority_high" size={14} color={colors.accentOrange} />
+                <Text style={styles.formPendingText}>
+                  Este participante ainda não preencheu o formulário do evento. O nome mostrado é do comprador.
+                </Text>
+              </View>
+            ) : null}
+
             {visibleFields.length > 0 && (
               <View style={styles.fieldsBox}>
                 {fieldsTitle ? (
@@ -266,6 +275,24 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgBase,
     borderWidth: 1,
     borderColor: colors.borderMuted,
+  },
+  formPendingBox: {
+    marginBottom: 14,
+    padding: 10,
+    borderRadius: radius.md,
+    backgroundColor: '#1F1A0F',
+    borderWidth: 1,
+    borderColor: '#4B3012',
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  formPendingText: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: font.weight.semibold,
+    color: '#E8C77A',
+    lineHeight: 15,
   },
   fieldsTitle: {
     fontSize: 10,

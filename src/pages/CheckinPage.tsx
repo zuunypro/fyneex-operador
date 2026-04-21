@@ -11,6 +11,7 @@ import {
 } from 'react-native'
 import { colors, font, radius } from '@/theme'
 import { ApiError } from '@/services/api'
+import { friendlyError } from '@/utils/errorMessages'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useParticipants, type MobileParticipant } from '@/hooks/useParticipants'
 import { useCheckin } from '@/hooks/useCheckin'
@@ -97,10 +98,8 @@ export function CheckinPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Participante já confirmado', 'success')
-      } else if (err instanceof ApiError) {
-        showToast(err.message, 'error')
       } else {
-        showToast('Erro ao realizar check-in', 'error')
+        showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
       }
     }
   }
@@ -123,10 +122,8 @@ export function CheckinPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Este check-in já havia sido revertido', 'success')
-      } else if (err instanceof ApiError) {
-        showToast(err.message, 'error')
       } else {
-        showToast('Erro ao reverter check-in', 'error')
+        showToast(friendlyError(err, 'Erro ao reverter check-in'), 'error')
       }
     }
   }
@@ -162,10 +159,8 @@ export function CheckinPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Participante já confirmado', 'success')
-      } else if (err instanceof ApiError) {
-        showToast(err.message, 'error')
       } else {
-        showToast('Erro ao realizar check-in', 'error')
+        showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
       }
     }
   }
@@ -183,12 +178,9 @@ export function CheckinPage() {
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
           showToast('Já confirmado', 'success')
-        } else if (err instanceof ApiError) {
-          feedbackBad()
-          showToast(err.message, 'error')
         } else {
           feedbackBad()
-          showToast('Erro ao realizar check-in', 'error')
+          showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
         }
       }
       return
@@ -218,12 +210,9 @@ export function CheckinPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast(`${target.name} já confirmado`, 'success')
-      } else if (err instanceof ApiError) {
-        feedbackBad()
-        showToast(err.message, 'error')
       } else {
         feedbackBad()
-        showToast('Erro ao realizar check-in', 'error')
+        showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
       }
     }
   }, [participants, checkinMutation, event.id, showToast])
@@ -540,6 +529,11 @@ const ParticipantRow = memo(function ParticipantRow({
                 </Text>
               </View>
             ) : null}
+            {p.nameFromForm === false ? (
+              <View style={styles.buyerFallbackBadge}>
+                <Text style={styles.buyerFallbackLabel}>comprador</Text>
+              </View>
+            ) : null}
           </View>
           <View style={styles.rowMeta}>
             <Text style={styles.rowMetaText} numberOfLines={1}>
@@ -595,8 +589,19 @@ const ParticipantRow = memo(function ParticipantRow({
 
           {(() => {
             const extraFields = (p.instanceFields || []).filter(
-              (f) => f.label.toLowerCase() !== 'nome',
+              (f) => !f.label.toLowerCase().includes('nome'),
             )
+            const formUnfilled = p.nameFromForm === false && extraFields.length === 0
+            if (formUnfilled) {
+              return (
+                <View style={styles.noFormBlock}>
+                  <Icon name="priority_high" size={14} color={colors.accentOrange} />
+                  <Text style={styles.noFormText}>
+                    Participante ainda não preencheu o formulário do evento. O nome acima é do comprador.
+                  </Text>
+                </View>
+              )
+            }
             if (extraFields.length === 0) return null
             return (
               <View>
@@ -914,6 +919,39 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: font.weight.extrabold,
     color: '#79B8FF',
+  },
+  buyerFallbackBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.sm,
+    backgroundColor: '#2A1F12',
+    borderWidth: 1,
+    borderColor: '#4B3012',
+  },
+  buyerFallbackLabel: {
+    fontSize: 9,
+    fontWeight: font.weight.extrabold,
+    color: colors.accentOrange,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  noFormBlock: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: radius.md,
+    backgroundColor: '#1F1A0F',
+    borderWidth: 1,
+    borderColor: '#4B3012',
+  },
+  noFormText: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: font.weight.semibold,
+    color: '#E8C77A',
+    lineHeight: 15,
   },
   rowMeta: {
     flexDirection: 'row',
