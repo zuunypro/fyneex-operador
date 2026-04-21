@@ -58,7 +58,10 @@ export function ProfilePage() {
 
   const eventPacket = event ? packets.find((p) => p.eventId === event.id) : undefined
   const pending = queue.filter((q) => q.status !== 'synced').length
-  const failed = queue.filter((q) => q.status === 'failed')
+  // Mostra no painel tudo que não foi sincronizado: failed explícito OU
+  // syncing travado de uma sessão anterior. Items "pending" novos são
+  // transientes (síncroniza em segundos) e ficam fora pra não poluir.
+  const stuck = queue.filter((q) => q.status === 'failed' || q.status === 'syncing')
 
   async function checkForUpdate() {
     if (checking) return
@@ -282,13 +285,13 @@ export function ProfilePage() {
         </View>
 
         {/* ── Erros de sync ─────────────────────────────────────────── */}
-        {failed.length > 0 ? (
+        {stuck.length > 0 ? (
           <>
             <Text style={styles.sectionTitle}>
-              Erros de sincronização ({failed.length})
+              Erros de sincronização ({stuck.length})
             </Text>
             <View style={styles.list}>
-              {failed.map((item, i) => (
+              {stuck.map((item, i) => (
                 <View
                   key={item.id}
                   style={[styles.row, i > 0 && styles.rowBorder, { alignItems: 'flex-start' }]}

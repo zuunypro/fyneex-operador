@@ -53,16 +53,15 @@ export function useKitWithdrawal() {
     mutationFn: async (data: WithdrawalPayload) => {
       const isOnline = useOfflineStore.getState().online !== false
       if (!isOnline) {
-        // enqueue primeiro pra não deixar UI otimista sem contrapartida no servidor.
         await enqueue({
           type: 'withdrawal',
           eventId: data.eventId,
           participantId: data.participantId,
           instanceIndex: data.instanceIndex,
         })
-        await patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
+        patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
           kitWithdrawnAt: new Date().toISOString(),
-        })
+        }).catch(() => { /* best-effort */ })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }

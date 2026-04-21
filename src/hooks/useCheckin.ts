@@ -58,9 +58,9 @@ export function useCheckin() {
 
       const isOnline = useOfflineStore.getState().online !== false
       if (!isOnline) {
-        // enqueue ANTES do patch: se enqueue falhar por algum motivo (quota,
-        // storage bloqueado), não deixamos a UI mentindo "entregue" sem o
-        // servidor jamais ser avisado.
+        // enqueue é o caminho crítico — se falhar, a mutation falha e o
+        // react-query reverte o optimistic. Patch do packet é best-effort
+        // (UI já otimista via onMutate, packet só ajuda em cold start).
         await enqueue({
           type: 'checkin',
           eventId: data.eventId,
@@ -68,12 +68,12 @@ export function useCheckin() {
           instanceIndex: data.instanceIndex,
           observation: payload.observation,
         })
-        await patchParticipantInPacket(
+        patchParticipantInPacket(
           data.eventId,
           data.participantId,
           data.instanceIndex,
           { status: 'checked', checkedInAt: new Date().toISOString() },
-        )
+        ).catch(() => { /* best-effort */ })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }

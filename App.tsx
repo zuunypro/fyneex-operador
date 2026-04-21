@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ActivityIndicator, AppState, type AppStateStatus, StyleSheet, View } from 'react-native'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import * as SystemUI from 'expo-system-ui'
 import * as Updates from 'expo-updates'
-import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager, useQueryClient } from '@tanstack/react-query'
 import { AppShell } from '@/components/AppShell'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { colors } from '@/theme'
@@ -61,7 +61,22 @@ function AppRouter() {
   const setIsLoggedIn = useNavigationStore((s) => s.setIsLoggedIn)
   const setUser = useUserStore((s) => s.setUser)
   const hydrateOffline = useOfflineStore((s) => s.hydrate)
+  const online = useOfflineStore((s) => s.online)
+  const queryClient = useQueryClient()
   const [hydrated, setHydrated] = useState(false)
+
+  // Invalida queries quando o app volta pra online. Sem isso, a lista de
+  // participants/inventory continua mostrando os dados cacheados do offline
+  // por até 15s (refetchInterval) depois que a net volta — o operador escaneia
+  // achando que tá online mas vê o estado antigo.
+  const prevOnlineRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    const prev = prevOnlineRef.current
+    prevOnlineRef.current = online
+    if (prev === false && online === true) {
+      queryClient.invalidateQueries({ queryKey: ['mobile'] })
+    }
+  }, [online, queryClient])
 
   useEffect(() => {
     let alive = true

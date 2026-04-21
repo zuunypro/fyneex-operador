@@ -70,6 +70,19 @@ interface OfflineState {
 
 const MAX_AUTO_ATTEMPTS = 3
 
+/** HTTP status em que retry não resolve — descartamos em vez de ficar tentando. */
+const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 410, 422])
+
+function humanizeError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 0) return 'Sem conexão com o servidor'
+    return err.message || `Erro ${err.status}`
+  }
+  const msg = err instanceof Error ? err.message : String(err)
+  if (msg.includes('Tempo esgotado')) return 'Timeout (rede lenta)'
+  return msg
+}
+
 const ACTION_TIMEOUT_MS = 15_000
 
 /**
@@ -291,51 +304,68 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     if (state.syncing) return { synced: 0, failed: 0 }
     if (state.online === false) return { synced: 0, failed: 0 }
 
-    const queue = await loadQueue()
-    // Auto-sync só tenta items que nunca falharam OU que falharam menos de
-    // MAX_AUTO_ATTEMPTS vezes. Depois disso, só vai pelo retry manual no
-    // painel "Erros de sync" (que reseta attempts pra 0 via retryAction).
-    const pending = queue.filter((q) => q.status !== 'synced' && q.attempts < MAX_AUTO_ATTEMPTS)
-    if (pending.length === 0) {
-      set({ queue })
-      return { synced: 0, failed: 0 }
-    }
-
     set({ syncing: true })
     let synced = 0
     let failed = 0
 
-    for (const action of pending) {
-      await updateQueueItem(action.id, { status: 'syncing', attempts: action.attempts + 1 })
-      try {
-        await callApi(action)
-        // Remove da fila no sucesso — não queremos acumular.
-        await removeFromQueue(action.id)
-        synced++
-      } catch (err) {
-        // 409 = já processado no servidor (ex: duplo scan). Conta como sync
-        // pra não travar a fila para sempre.
-        if (err instanceof ApiError && err.status === 409) {
+    // try/finally garante que `syncing: false` SEMPRE volta pra false, mesmo
+    // se AsyncStorage ou algo inesperado lançar fora do try interno. Antes,
+    // um throw de updateQueueItem deixava a store presa em syncing=true até
+    // reabrir o app — e syncNow recusava rodar de novo.
+    try {
+      const queue = await loadQueue()
+      const pending = queue.filter(
+        (q) => q.status !== 'synced' && q.attempts < MAX_AUTO_ATTEMPTS,
+      )
+      if (pending.length === 0) {
+        set({ queue })
+        return { synced: 0, failed: 0 }
+      }
+
+      for (const action of pending) {
+        try {
+          await updateQueueItem(action.id, {
+            status: 'syncing',
+            attempts: action.attempts + 1,
+          })
+          await callApi(action)
           await removeFromQueue(action.id)
           synced++
-          continue
+        } catch (err) {
+          const apiErr = err instanceof ApiError ? err : null
+
+          // 409 = já processado no servidor (outro operador ou double scan).
+          // Remove da fila — conta como sync.
+          if (apiErr && apiErr.status === 409) {
+            await removeFromQueue(action.id).catch(() => {})
+            synced++
+            continue
+          }
+
+          // Erros permanentes do servidor: 400 (payload inválido), 401/403
+          // (auth quebrada), 404 (participant/evento não existe). Retry não
+          // resolveria — dropa da fila com mensagem clara pra não acumular
+          // lixo nem drenar bateria tentando de novo.
+          if (apiErr && PERMANENT_STATUSES.has(apiErr.status)) {
+            await removeFromQueue(action.id).catch(() => {})
+            failed++
+            continue
+          }
+
+          const msg = humanizeError(err)
+          await updateQueueItem(action.id, { status: 'failed', error: msg }).catch(() => {})
+          failed++
         }
-        const msg = err instanceof Error ? err.message : String(err)
-        await updateQueueItem(action.id, { status: 'failed', error: msg })
-        failed++
       }
+    } finally {
+      const next = await loadQueue().catch(() => state.queue)
+      set({
+        syncing: false,
+        queue: next,
+        lastSync: { at: new Date().toISOString(), synced, failed },
+      })
     }
 
-    const next = await loadQueue()
-    set({
-      syncing: false,
-      queue: next,
-      lastSync: {
-        at: new Date().toISOString(),
-        synced,
-        failed,
-      },
-    })
     return { synced, failed }
   },
 }))

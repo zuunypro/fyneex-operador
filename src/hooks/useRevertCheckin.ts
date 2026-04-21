@@ -56,10 +56,10 @@ export function useRevertCheckin() {
           participantId: data.participantId,
           instanceIndex: data.instanceIndex,
         })
-        await patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
+        patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
           status: 'pending',
           checkedInAt: null,
-        })
+        }).catch(() => { /* best-effort */ })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }

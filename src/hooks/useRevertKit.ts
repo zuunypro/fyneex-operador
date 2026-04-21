@@ -41,9 +41,9 @@ export function useRevertKit() {
           eventId: data.eventId,
           participantId: data.participantId,
         })
-        await patchParticipantInPacket(data.eventId, data.participantId, undefined, {
+        patchParticipantInPacket(data.eventId, data.participantId, undefined, {
           kitWithdrawnAt: null,
-        })
+        }).catch(() => { /* best-effort */ })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }
