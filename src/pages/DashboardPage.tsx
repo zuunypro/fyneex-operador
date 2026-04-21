@@ -13,12 +13,20 @@ export function DashboardPage() {
 
   const stats = statsData?.stats
   const checkinRate = stats?.checkinRate ?? 0
-  const stockRate = stats?.stock?.rate ?? 0
   const stockReserved = stats?.stock?.totalReserved ?? 0
   const stockWithdrawn = stats?.stock?.totalWithdrawn ?? 0
   const stockPending = stats?.stock?.pendingWithdrawals ?? 0
   const stockTotalItems = stats?.stock?.totalItems ?? 0
-  const hasStock = stockTotalItems > 0 && stockReserved > 0
+  // Percentual correto: entregues sobre o total de entregas previstas
+  // (reserved decrementa quando algo é retirado; reserved+withdrawn = total).
+  // Antes usávamos `stats.stock.rate` do backend que fazia withdrawn/reserved,
+  // o que subia artificialmente conforme reserved caía (ex: 10 de 10 "restantes"
+  // = 100%, mesmo tendo só entregado 10 de 20 planejados).
+  const stockTotalPlanned = stockReserved + stockWithdrawn
+  const stockRate = stockTotalPlanned > 0
+    ? Math.round((stockWithdrawn / stockTotalPlanned) * 100)
+    : 0
+  const hasStock = stockTotalItems > 0 && stockTotalPlanned > 0
 
   const initials = user?.name
     ? user.name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() || '').join('')
@@ -64,7 +72,7 @@ export function DashboardPage() {
               icon="inventory_2"
               detail={
                 hasStock
-                  ? `${stockWithdrawn} / ${stockReserved}${stockPending > 0 ? ` · ${stockPending} a entregar` : ''}`
+                  ? `${stockWithdrawn} / ${stockTotalPlanned}${stockPending > 0 ? ` · ${stockPending} a entregar` : ''}`
                   : 'sem itens'
               }
               color={colors.accentOrange}

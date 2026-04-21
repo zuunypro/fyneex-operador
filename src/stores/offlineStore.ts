@@ -50,6 +50,10 @@ interface OfflineState {
   syncNow: () => Promise<{ synced: number; failed: number }>
   /** Atualiza packets/queue depois de operações externas. */
   refreshState: () => Promise<void>
+  /** Reseta status de um item failed pra pending e roda syncNow. */
+  retryAction: (id: string) => Promise<void>
+  /** Remove um item do queue sem executar (descartar falha). */
+  dropAction: (id: string) => Promise<void>
   /** Baixa participants + inventory do evento pra uso offline. */
   downloadEvent: (
     eventId: string,
@@ -59,32 +63,55 @@ interface OfflineState {
   deleteEvent: (eventId: string) => Promise<void>
 }
 
+const ACTION_TIMEOUT_MS = 15_000
+
+/**
+ * Roda o apiPost com timeout estrito pra não travar a fila em conexão lenta.
+ * Timeout vira erro normal que vai ser capturado no syncNow e marca o item
+ * como failed — o operador pode tentar de novo depois.
+ */
 async function callApi(action: PendingAction): Promise<void> {
+  const race = <T>(p: Promise<T>): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error('Tempo esgotado (15s)')), ACTION_TIMEOUT_MS),
+      ),
+    ])
+
   if (action.type === 'checkin') {
-    await apiPost('/api/mobile/checkin', {
-      participantId: action.participantId,
-      eventId: action.eventId,
-      instanceIndex: action.instanceIndex,
-      observation: action.observation,
-    })
+    await race(
+      apiPost('/api/mobile/checkin', {
+        participantId: action.participantId,
+        eventId: action.eventId,
+        instanceIndex: action.instanceIndex,
+        observation: action.observation,
+      }),
+    )
   } else if (action.type === 'revert-checkin') {
-    await apiPost('/api/mobile/checkin/revert', {
-      participantId: action.participantId,
-      eventId: action.eventId,
-      instanceIndex: action.instanceIndex,
-    })
+    await race(
+      apiPost('/api/mobile/checkin/revert', {
+        participantId: action.participantId,
+        eventId: action.eventId,
+        instanceIndex: action.instanceIndex,
+      }),
+    )
   } else if (action.type === 'withdrawal') {
-    await apiPost('/api/mobile/checkin', {
-      participantId: action.participantId,
-      eventId: action.eventId,
-      instanceIndex: action.instanceIndex,
-      mode: 'withdrawal',
-    })
+    await race(
+      apiPost('/api/mobile/checkin', {
+        participantId: action.participantId,
+        eventId: action.eventId,
+        instanceIndex: action.instanceIndex,
+        mode: 'withdrawal',
+      }),
+    )
   } else if (action.type === 'revert-kit') {
-    await apiPost('/api/mobile/kit/revert', {
-      participantId: action.participantId,
-      eventId: action.eventId,
-    })
+    await race(
+      apiPost('/api/mobile/kit/revert', {
+        participantId: action.participantId,
+        eventId: action.eventId,
+      }),
+    )
   }
 }
 
@@ -147,62 +174,85 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     set({ packets, queue })
   },
 
+  retryAction: async (id) => {
+    await updateQueueItem(id, { status: 'pending', error: undefined })
+    await get().refreshState()
+    if (get().online !== false) await get().syncNow()
+  },
+
+  dropAction: async (id) => {
+    await removeFromQueue(id)
+    await get().refreshState()
+  },
+
   downloadEvent: async (eventId, onProgress) => {
+    // Guard: impede concorrência. Se já tem download rolando, sai cedo.
+    if (get().downloading) {
+      throw new Error('Já existe um download em andamento — aguarde terminar')
+    }
     const emit = (p: DownloadProgress) => {
       set({ downloading: { eventId, progress: p } })
       onProgress?.(p)
     }
 
-    emit({ step: 'participants', message: 'Baixando participantes...', percent: 5 })
-
-    // Paginado. pageSize=500 cobre a maioria dos eventos em 1 request;
-    // loop só pra segurança em eventos gigantes.
-    const participants: MobileParticipant[] = []
-    let page = 0
-    const pageSize = 500
-    while (true) {
-      const res = await apiGet<ParticipantsPage>(
-        `/api/mobile/events/${eventId}/participants?page=${page}&pageSize=${pageSize}`,
-      )
-      participants.push(...res.participants)
-      if (participants.length >= res.total || res.participants.length < pageSize) break
-      page++
-      emit({
-        step: 'participants',
-        message: `Baixando participantes... (${participants.length} de ${res.total})`,
-        percent: 5 + Math.min(45, Math.floor((participants.length / res.total) * 45)),
-      })
-    }
-
-    emit({ step: 'inventory', message: 'Baixando estoque...', percent: 60 })
-
-    let inventoryItems: InventoryItem[] = []
-    let inventoryStats: InventoryStats | undefined
     try {
-      const inv = await apiGet<InventoryPage>(
-        `/api/mobile/events/${eventId}/inventory?page=0&pageSize=500`,
-      )
-      inventoryItems = inv.items
-      inventoryStats = inv.stats
-    } catch {
-      // Evento pode não ter inventário — não bloqueia o download.
+      emit({ step: 'participants', message: 'Baixando participantes...', percent: 5 })
+
+      // Paginado. pageSize=500 cobre a maioria dos eventos em 1 request;
+      // loop só pra segurança em eventos gigantes. Máximo de 20 páginas (10k)
+      // pra não travar em loop infinito se o backend reportar total errado.
+      const participants: MobileParticipant[] = []
+      const pageSize = 500
+      for (let page = 0; page < 20; page++) {
+        const res = await apiGet<ParticipantsPage>(
+          `/api/mobile/events/${eventId}/participants?page=${page}&pageSize=${pageSize}`,
+        )
+        participants.push(...res.participants)
+        if (participants.length >= res.total || res.participants.length < pageSize) break
+        emit({
+          step: 'participants',
+          message: `Baixando participantes... (${participants.length} de ${res.total})`,
+          percent: 5 + Math.min(45, Math.floor((participants.length / res.total) * 45)),
+        })
+      }
+
+      emit({ step: 'inventory', message: 'Baixando estoque...', percent: 60 })
+
+      let inventoryItems: InventoryItem[] = []
+      let inventoryStats: InventoryStats | undefined
+      try {
+        const inv = await apiGet<InventoryPage>(
+          `/api/mobile/events/${eventId}/inventory?page=0&pageSize=500`,
+        )
+        inventoryItems = inv.items
+        inventoryStats = inv.stats
+      } catch {
+        // Evento pode não ter inventário — não bloqueia o download.
+      }
+
+      emit({ step: 'saving', message: 'Gravando no dispositivo...', percent: 85 })
+
+      await savePacket({
+        eventId,
+        downloadedAt: new Date().toISOString(),
+        participants,
+        inventory: { items: inventoryItems, stats: inventoryStats },
+      })
+
+      await get().refreshState()
+      const meta = get().packets.find((p) => p.eventId === eventId)
+      if (!meta) throw new Error('Packet salvo mas não indexado — reabra o app')
+
+      emit({ step: 'done', message: 'Concluído', percent: 100 })
+      set({ downloading: null })
+      return meta
+    } catch (err) {
+      // Qualquer falha (rede, storage, parsing) libera o estado pra usuário
+      // conseguir tentar de novo.
+      set({ downloading: null })
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`Falha no download: ${msg}`)
     }
-
-    emit({ step: 'saving', message: 'Gravando no dispositivo...', percent: 85 })
-
-    await savePacket({
-      eventId,
-      downloadedAt: new Date().toISOString(),
-      participants,
-      inventory: { items: inventoryItems, stats: inventoryStats },
-    })
-
-    await get().refreshState()
-    const meta = get().packets.find((p) => p.eventId === eventId)!
-
-    emit({ step: 'done', message: 'Concluído', percent: 100 })
-    set({ downloading: null })
-    return meta
   },
 
   deleteEvent: async (eventId) => {
