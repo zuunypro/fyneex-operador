@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK (debug)
+    name: Build Android APK (release)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -49,11 +49,27 @@ jobs:
       - name: Expo prebuild (generate android/ folder)
         run: npx expo prebuild --platform android --clean --no-install
 
-      - name: Build debug APK
+      - name: Ensure debug keystore exists
+        run: |
+          # Expo prebuild copia o debug.keystore pra android/app/. Se por alguma
+          # razao nao existir (versao mais nova do Expo), gera um novo ai.
+          if [ ! -f android/app/debug.keystore ]; then
+            keytool -genkey -v -keystore android/app/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build release APK (JS bundle embedded, signed with debug key)
         run: |
           cd android
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --parallel -x lint -x test
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/debug.keystore \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android \
+            --no-daemon --parallel -x lint -x test
 
       - name: Rename APK with version
         id: rename
@@ -61,7 +77,10 @@ jobs:
           VERSION=$(node -p "require('./app.json').expo.version")
           SHORT_SHA=${GITHUB_SHA::7}
           APK_NAME="fyneex-operador-${VERSION}-${SHORT_SHA}.apk"
-          mv android/app/build/outputs/apk/debug/app-debug.apk "android/app/build/outputs/apk/debug/${APK_NAME}"
+          # O APK sai em app-release.apk OU app-release-unsigned.apk dependendo
+          # da versao do AGP; aceita os dois.
+          SRC=$(ls android/app/build/outputs/apk/release/app-release*.apk | head -1)
+          mv "$SRC" "android/app/build/outputs/apk/release/${APK_NAME}"
           echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
@@ -69,20 +88,21 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.rename.outputs.apk_name }}
-          path: android/app/build/outputs/apk/debug/${{ steps.rename.outputs.apk_name }}
+          path: android/app/build/outputs/apk/release/${{ steps.rename.outputs.apk_name }}
           retention-days: 30
 
-      - name: Create GitHub Release (on push to main only)
+      - name: Create GitHub Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.rename.outputs.version }}-${{ github.run_number }}
+          tag_name: v${{ steps.rename.outputs.version }}-build${{ github.run_number }}
           name: APK v${{ steps.rename.outputs.version }} build ${{ github.run_number }}
           body: |
-            APK gerado automaticamente pelo commit `${{ github.sha }}`.
+            APK assinado (debug keystore, suficiente pra sideload).
+            Commit `${{ github.sha }}`.
 
             **Baixe o .apk abaixo**, abra no Chrome do celular, permita instalar de fonte desconhecida, instale por cima do anterior.
-          files: android/app/build/outputs/apk/debug/${{ steps.rename.outputs.apk_name }}
+          files: android/app/build/outputs/apk/release/${{ steps.rename.outputs.apk_name }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

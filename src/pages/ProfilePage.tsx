@@ -10,8 +10,15 @@ import { Icon } from '@/components/Icon'
 type BadgeTone = 'green' | 'orange' | 'blue'
 
 const APP_VERSION = (Constants.expoConfig?.version as string | undefined) || '1.0.0'
-const CHANNEL = Updates.channel || 'dev'
-const UPDATE_ID = (Updates.updateId || '').slice(0, 8) || '—'
+
+// Defensivo: acessar Updates.channel/updateId pode lançar em builds onde o
+// native module não está pronto (ex: release builds antes do primeiro fetch).
+// Embrulha em try/catch pra não quebrar o import do módulo.
+function safeString(getter: () => string | null | undefined, fallback: string): string {
+  try { return getter() || fallback } catch { return fallback }
+}
+const CHANNEL = safeString(() => Updates.channel, 'dev')
+const UPDATE_ID = safeString(() => (Updates.updateId || '').slice(0, 8), '—')
 
 export function ProfilePage() {
   const user = useUserStore((s) => s.user)
