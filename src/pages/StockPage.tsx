@@ -401,9 +401,12 @@ export function StockPage() {
       {isError && !isLoading ? (
         <View style={styles.errorCard}>
           <Icon name="wifi_off" size={36} color={colors.accentRed} />
-          <Text style={styles.errorTitle}>Erro ao carregar participantes</Text>
+          <Text style={styles.errorTitle}>Lista indisponível</Text>
+          <Text style={styles.errorHint}>
+            Use o scanner abaixo — a retirada vai ser salva e sincronizada depois.
+          </Text>
           <Pressable onPress={() => refetch()} style={styles.retryButton}>
-            <Text style={styles.retryLabel}>Tentar novamente</Text>
+            <Text style={styles.retryLabel}>Tentar recarregar</Text>
           </Pressable>
         </View>
       ) : (
@@ -1002,6 +1005,14 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: font.weight.semibold,
     color: colors.textPrimary,
+  },
+  errorHint: {
+    fontSize: 11,
+    fontWeight: font.weight.medium,
+    color: '#B0B0B0',
+    textAlign: 'center',
+    lineHeight: 15,
+    paddingHorizontal: 12,
   },
   retryButton: {
     marginTop: 6,
