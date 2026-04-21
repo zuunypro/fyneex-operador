@@ -12,11 +12,16 @@ import Constants from 'expo-constants'
 import { getAccessHashSync } from '@/stores/userStore'
 
 const FALLBACK_URL = 'https://fyneexsports.com'
-const BASE_URL = (
+const rawUrl = (
   (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)?.apiUrl ||
   process.env.EXPO_PUBLIC_API_URL ||
   FALLBACK_URL
 ).replace(/\/$/, '')
+
+// Se a env vier vazia ou inválida, usa o fallback ao invés de tentar um URL quebrado.
+const BASE_URL = rawUrl.startsWith('http') ? rawUrl : FALLBACK_URL
+
+const DEFAULT_API_TIMEOUT_MS = 30_000
 
 export class ApiError extends Error {
   status: number
@@ -40,40 +45,77 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
-  const data = await res.json().catch(() => ({})) as Record<string, unknown>
-
+  let data: Record<string, unknown> = {}
+  try {
+    data = await res.json() as Record<string, unknown>
+  } catch {
+    // Resposta não é JSON (ex: HTML de 502/503 de gateway). Nunca vazamos o HTML
+    // pro operador — mensagem genérica por status.
+    if (!res.ok) {
+      throw new ApiError(
+        res.status >= 500
+          ? 'Erro no servidor — tente novamente em instantes'
+          : `HTTP ${res.status}`,
+        res.status,
+      )
+    }
+  }
   if (!res.ok) {
     const message = (data.error as string) || `HTTP ${res.status}`
     const code = data.code as string | undefined
     throw new ApiError(message, res.status, code)
   }
-
   return data as T
 }
 
-async function doFetch(input: string, init: RequestInit): Promise<Response> {
+/**
+ * Wrapper de fetch com timeout (AbortController) pra não pendurar em rede
+ * lenta ou servidor travado. Aceita signal externo do chamador (ex: syncNow
+ * que tem seu próprio timeout de 15s mais curto).
+ */
+async function doFetch(
+  input: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_API_TIMEOUT_MS)
+
+  // Propaga o abort do caller pra nosso controller (o primeiro a abortar vence).
+  signal?.addEventListener('abort', () => controller.abort(), { once: true })
+
   try {
-    return await fetch(input, init)
+    return await fetch(input, { ...init, signal: controller.signal })
   } catch (err) {
+    if (controller.signal.aborted) {
+      throw new ApiError('Tempo esgotado — servidor sem resposta', 0, 'TIMEOUT')
+    }
     const msg = err instanceof Error ? err.message : String(err)
     throw new ApiError(`Falha de rede: ${msg}`, 0, 'NETWORK_ERROR')
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await doFetch(`${BASE_URL}${path}`, {
-    method: 'GET',
-    headers: getAuthHeaders(),
-  })
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await doFetch(
+    `${BASE_URL}${path}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    signal,
+  )
   return handleResponse<T>(res)
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const res = await doFetch(`${BASE_URL}${path}`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(body),
-  })
+export async function apiPost<T>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await doFetch(
+    `${BASE_URL}${path}`,
+    { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body) },
+    signal,
+  )
   return handleResponse<T>(res)
 }
 

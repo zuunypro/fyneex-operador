@@ -56,7 +56,9 @@ export function useParticipants(eventId: string, options: UseParticipantsOptions
   params.set('pageSize', String(pageSize))
 
   return useQuery({
-    queryKey: ['mobile', 'participants', eventId, { search, status, page, pageSize }],
+    // `online` faz parte da key pra que a transição offline↔online invalide
+    // o cache e force a query a re-executar com o caminho correto (API vs packet).
+    queryKey: ['mobile', 'participants', eventId, { search, status, page, pageSize, online }],
     queryFn: async () => {
       // Offline: tenta servir do packet local. Busca/filtro são aplicados
       // client-side pra replicar a experiência online.
@@ -75,10 +77,13 @@ export function useParticipants(eventId: string, options: UseParticipantsOptions
             p.orderNumber.toLowerCase().includes(s)
           )
         })
+        // Clamp page pra não retornar array vazio se caller pedir página além do limite.
+        const maxPage = pageSize > 0 ? Math.max(0, Math.ceil(filtered.length / pageSize) - 1) : 0
+        const safePage = Math.min(page, maxPage)
         return {
-          participants: filtered.slice(page * pageSize, (page + 1) * pageSize),
+          participants: filtered.slice(safePage * pageSize, (safePage + 1) * pageSize),
           total: filtered.length,
-          page,
+          page: safePage,
           pageSize,
         } as ParticipantsResponse
       }

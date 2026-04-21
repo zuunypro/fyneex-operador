@@ -51,6 +51,7 @@ export function ProfilePage() {
 
   const [checking, setChecking] = useState(false)
   const [updateReady, setUpdateReady] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
 
   const initials = user?.name
     ? user.name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() || '').join('')
@@ -147,13 +148,20 @@ export function ProfilePage() {
 
   // Wrapper do logout — se tiver items pendentes, avisa que vão ser perdidos.
   // Evita que user A deixe items pra ser sincronizados com token do user B.
+  // isLoggingOut previne double-tap que dispararia wipeAll+doLogout duas vezes.
   async function handleLogout() {
+    if (isLoggingOut) return
+    setIsLoggingOut(true)
     if (pending > 0) {
       Alert.alert(
         'Sair sem sincronizar?',
         `${pending} escaneamento${pending === 1 ? '' : 's'} pendente${pending === 1 ? '' : 's'} será${pending === 1 ? '' : 'ão'} descartado${pending === 1 ? '' : 's'}. Sincronize antes se for importante.`,
         [
-          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: 'Cancelar',
+            style: 'cancel',
+            onPress: () => setIsLoggingOut(false),
+          },
           {
             text: 'Sair mesmo assim',
             style: 'destructive',
@@ -165,8 +173,12 @@ export function ProfilePage() {
         ],
       )
     } else {
-      await wipeAll()
-      await doLogout()
+      try {
+        await wipeAll()
+        await doLogout()
+      } catch {
+        setIsLoggingOut(false)
+      }
     }
   }
 
@@ -213,7 +225,7 @@ export function ProfilePage() {
             <Pressable
               onPress={handleDownload}
               style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-              disabled={!event}
+              disabled={!!downloading || !event}
             >
               <View style={styles.rowLeft}>
                 <View style={[styles.rowIconBox, { backgroundColor: colors.accentGreenBg, borderColor: colors.accentGreenDim }]}>
@@ -382,7 +394,11 @@ export function ProfilePage() {
           </Pressable>
         </View>
 
-        <Pressable onPress={handleLogout} style={styles.logoutButton}>
+        <Pressable
+          onPress={handleLogout}
+          disabled={isLoggingOut}
+          style={[styles.logoutButton, isLoggingOut && { opacity: 0.5 }]}
+        >
           <View style={styles.logoutLeft}>
             <View style={styles.logoutIconBox}>
               <Icon name="logout" size={20} color={colors.accentRed} />

@@ -58,6 +58,7 @@ export function useKitWithdrawal() {
           eventId: data.eventId,
           participantId: data.participantId,
           instanceIndex: data.instanceIndex,
+          allowNoStock: data.allowNoStock,
         })
         patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
           kitWithdrawnAt: new Date().toISOString(),
@@ -103,7 +104,8 @@ export function useKitWithdrawal() {
       }
     },
 
-    onSettled: (_data, _err, variables) => {
+    onSettled: (data, _err, variables) => {
+      if (data?.queued) return
       queryClient.invalidateQueries({
         queryKey: ['mobile', 'participants', variables.eventId],
       })

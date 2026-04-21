@@ -112,6 +112,9 @@ export function QRScanner({
     if (flashRef.current) clearTimeout(flashRef.current)
     if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current)
     if (errorClearRef.current) clearTimeout(errorClearRef.current)
+    // Reset semáforo: se o componente desmontar durante onScan (usuário troca
+    // de aba em < 180ms), a próxima montagem começa sem o lock travado.
+    scannedRef.current = false
   }, [])
 
   const handleDetected = useCallback((raw: string) => {

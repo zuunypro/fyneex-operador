@@ -85,6 +85,9 @@ function AppRouter() {
       if (user) {
         setUser(user)
         setIsLoggedIn(true)
+      } else {
+        // Garante que isLoggedIn=false mesmo se algo externo tentou setar antes.
+        setIsLoggedIn(false)
       }
       setHydrated(true)
     })

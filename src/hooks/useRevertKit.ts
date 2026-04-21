@@ -7,6 +7,7 @@ import type { MobileParticipant } from './useParticipants'
 interface RevertKitPayload {
   participantId: string
   eventId: string
+  instanceIndex?: number
 }
 
 interface RevertKitResponse {
@@ -40,14 +41,19 @@ export function useRevertKit() {
           type: 'revert-kit',
           eventId: data.eventId,
           participantId: data.participantId,
+          instanceIndex: data.instanceIndex,
         })
-        patchParticipantInPacket(data.eventId, data.participantId, undefined, {
+        patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
           kitWithdrawnAt: null,
         }).catch(() => { /* best-effort */ })
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }
-      return apiPost<RevertKitResponse>('/api/mobile/kit/revert', data)
+      return apiPost<RevertKitResponse>('/api/mobile/kit/revert', {
+        participantId: data.participantId,
+        eventId: data.eventId,
+        instanceIndex: data.instanceIndex,
+      })
     },
 
     onMutate: async (variables) => {
@@ -60,11 +66,11 @@ export function useRevertKit() {
         (old) => {
           if (!old) return old
           snapshots.push({ key: ['mobile', 'participants', variables.eventId], data: old })
-          const next = old.participants.map((p) =>
-            p.participantId === variables.participantId
-              ? { ...p, kitWithdrawnAt: null }
-              : p,
-          )
+          const next = old.participants.map((p) => {
+            if (p.participantId !== variables.participantId) return p
+            if (variables.instanceIndex !== undefined && p.instanceIndex !== variables.instanceIndex) return p
+            return { ...p, kitWithdrawnAt: null }
+          })
           return { ...old, participants: next }
         },
       )
@@ -85,7 +91,8 @@ export function useRevertKit() {
       }
     },
 
-    onSettled: (_data, _err, variables) => {
+    onSettled: (data, _err, variables) => {
+      if (data?.queued) return
       queryClient.invalidateQueries({
         queryKey: ['mobile', 'participants', variables.eventId],
       })

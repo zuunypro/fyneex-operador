@@ -47,7 +47,7 @@ interface OfflineState {
     synced: number
     failed: number
   } | null
-  /** Hidrata o estado inicial do disco. Idempotente. */
+  /** Hidrata o estado inicial do disco. Idempotente — chamadas paralelas retornam a mesma Promise. */
   hydrate: () => Promise<void>
   /** Dispara manualmente (pull-to-refresh, botão "Sincronizar agora"). */
   syncNow: () => Promise<{ synced: number; failed: number }>
@@ -69,74 +69,89 @@ interface OfflineState {
 }
 
 const MAX_AUTO_ATTEMPTS = 3
-
-/** HTTP status em que retry não resolve — descartamos em vez de ficar tentando. */
-const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 410, 422])
+const ACTION_TIMEOUT_MS = 15_000
 
 function humanizeError(err: unknown): string {
   if (err instanceof ApiError) {
+    if (err.code === 'TIMEOUT') return 'Timeout (rede lenta)'
     if (err.status === 0) return 'Sem conexão com o servidor'
     return err.message || `Erro ${err.status}`
   }
   const msg = err instanceof Error ? err.message : String(err)
-  if (msg.includes('Tempo esgotado')) return 'Timeout (rede lenta)'
+  if (msg.includes('Tempo esgotado') || msg.toLowerCase().includes('aborted')) {
+    return 'Timeout (rede lenta)'
+  }
   return msg
 }
 
-const ACTION_TIMEOUT_MS = 15_000
-
 /**
- * Roda o apiPost com timeout estrito pra não travar a fila em conexão lenta.
- * Timeout vira erro normal que vai ser capturado no syncNow e marca o item
- * como failed — o operador pode tentar de novo depois.
+ * Chama a API pra drenar uma ação da fila. Usa AbortController com o signal
+ * passado pelo syncNow (que tem timeout próprio de 15s), cancelando o fetch
+ * subjacente em vez de só ignorar a resposta como o Promise.race fazia.
  */
-async function callApi(action: PendingAction): Promise<void> {
-  const race = <T>(p: Promise<T>): Promise<T> =>
-    Promise.race([
-      p,
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new Error('Tempo esgotado (15s)')), ACTION_TIMEOUT_MS),
-      ),
-    ])
-
+async function callApi(action: PendingAction, signal: AbortSignal): Promise<void> {
   if (action.type === 'checkin') {
-    await race(
-      apiPost('/api/mobile/checkin', {
+    await apiPost(
+      '/api/mobile/checkin',
+      {
         participantId: action.participantId,
         eventId: action.eventId,
         instanceIndex: action.instanceIndex,
         observation: action.observation,
-      }),
+      },
+      signal,
     )
   } else if (action.type === 'revert-checkin') {
-    await race(
-      apiPost('/api/mobile/checkin/revert', {
+    await apiPost(
+      '/api/mobile/checkin/revert',
+      {
         participantId: action.participantId,
         eventId: action.eventId,
         instanceIndex: action.instanceIndex,
-      }),
+      },
+      signal,
     )
   } else if (action.type === 'withdrawal') {
-    await race(
-      apiPost('/api/mobile/checkin', {
+    await apiPost(
+      '/api/mobile/checkin',
+      {
         participantId: action.participantId,
         eventId: action.eventId,
         instanceIndex: action.instanceIndex,
         mode: 'withdrawal',
-      }),
+        allowNoStock: action.allowNoStock,
+      },
+      signal,
     )
   } else if (action.type === 'revert-kit') {
-    await race(
-      apiPost('/api/mobile/kit/revert', {
+    await apiPost(
+      '/api/mobile/kit/revert',
+      {
         participantId: action.participantId,
         eventId: action.eventId,
-      }),
+        instanceIndex: action.instanceIndex,
+      },
+      signal,
     )
   }
 }
 
 let netUnsub: (() => void) | null = null
-let hydrated = false
+
+/**
+ * Promise singleton pra hydrate — garante que chamadas paralelas (ex: HMR,
+ * dois componentes montando ao mesmo tempo) executem a inicialização uma
+ * única vez e compartilhem o resultado.
+ */
+let hydratePromise: Promise<void> | null = null
+
+/**
+ * Flag atômica fora do Zustand pra evitar race condition no syncNow.
+ * Zustand set() tem lag de propagação — se dois calls passam pelo
+ * `if (state.syncing)` antes do set propagar, ambos executariam sync em
+ * paralelo. Um booleano de módulo é síncrono e não tem esse problema.
+ */
+let syncRunning = false
 
 interface ParticipantsPage {
   participants: MobileParticipant[]
@@ -161,42 +176,44 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
   downloading: null,
   lastSync: null,
 
-  hydrate: async () => {
-    if (hydrated) return
-    hydrated = true
+  hydrate: () => {
+    if (hydratePromise) return hydratePromise
+    hydratePromise = (async () => {
+      const [packets, queue] = await Promise.all([loadIndex(), loadQueue()])
+      set({ packets, queue })
 
-    const [packets, queue] = await Promise.all([loadIndex(), loadQueue()])
-    set({ packets, queue })
-
-    // Primeira leitura do NetInfo.
-    let initialOnline = true
-    try {
-      const first = await NetInfo.fetch()
-      initialOnline = first.isInternetReachable !== false && first.isConnected !== false
-    } catch {
-      initialOnline = true
-    }
-    set({ online: initialOnline })
-
-    // BUG corrigido: se o app abrir JÁ online e com fila pendente (operador
-    // fechou+abriu com net ativa), o listener não dispara "transição online"
-    // porque nunca houve offline→online nesta sessão. Disparamos na mão aqui.
-    if (initialOnline && queue.some((q) => q.status !== 'synced')) {
-      setTimeout(() => void get().syncNow(), 500)
-    }
-
-    // Subscribe (guarda unsub pra evitar duplicar listeners em HMR).
-    if (netUnsub) netUnsub()
-    netUnsub = NetInfo.addEventListener((st) => {
-      const isOnline = st.isInternetReachable !== false && st.isConnected !== false
-      const prev = get().online
-      set({ online: isOnline })
-      // Voltou online E tem fila → tenta drenar. Delay de 1.5s pra dar tempo
-      // da rede estabilizar (DNS, handshake) — evita falha em rajada.
-      if (isOnline && prev === false && get().queue.length > 0) {
-        setTimeout(() => void get().syncNow(), 1500)
+      // Primeira leitura do NetInfo.
+      let initialOnline = true
+      try {
+        const first = await NetInfo.fetch()
+        initialOnline = first.isInternetReachable !== false && first.isConnected !== false
+      } catch {
+        initialOnline = true
       }
-    })
+      set({ online: initialOnline })
+
+      // BUG corrigido: se o app abrir JÁ online e com fila pendente (operador
+      // fechou+abriu com net ativa), o listener não dispara "transição online"
+      // porque nunca houve offline→online nesta sessão. Disparamos na mão aqui.
+      if (initialOnline && queue.some((q) => q.status !== 'synced')) {
+        setTimeout(() => void get().syncNow(), 500)
+      }
+
+      // Subscribe (guarda unsub pra evitar duplicar listeners — hydratePromise
+      // garante que só roda uma vez, mas netUnsub é safety net adicional).
+      if (netUnsub) netUnsub()
+      netUnsub = NetInfo.addEventListener((st) => {
+        const isOnline = st.isInternetReachable !== false && st.isConnected !== false
+        const prev = get().online
+        set({ online: isOnline })
+        // Voltou online E tem fila → tenta drenar. Delay de 1.5s pra dar tempo
+        // da rede estabilizar (DNS, handshake) — evita falha em rajada.
+        if (isOnline && prev === false && get().queue.length > 0) {
+          setTimeout(() => void get().syncNow(), 1500)
+        }
+      })
+    })()
+    return hydratePromise
   },
 
   refreshState: async () => {
@@ -295,15 +312,17 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
   },
 
   wipeAll: async () => {
+    // Sinaliza pro syncNow em andamento que deve abortar (ele verifica no loop).
+    syncRunning = false
     await Promise.all([wipePackets(), clearQueue()])
-    set({ packets: [], queue: [], lastSync: null })
+    set({ packets: [], queue: [], lastSync: null, syncing: false })
   },
 
   syncNow: async () => {
-    const state = get()
-    if (state.syncing) return { synced: 0, failed: 0 }
-    if (state.online === false) return { synced: 0, failed: 0 }
-
+    // syncRunning é atômico (JS single-threaded): leitura + escrita acontecem
+    // antes de qualquer await, então não há race entre dois calls simultâneos.
+    if (syncRunning || get().online === false) return { synced: 0, failed: 0 }
+    syncRunning = true
     set({ syncing: true })
     let synced = 0
     let failed = 0
@@ -323,42 +342,73 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
       }
 
       for (const action of pending) {
+        // Se wipeAll foi chamado durante o loop (logout), interrompe gracefully.
+        if (!syncRunning) break
+
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), ACTION_TIMEOUT_MS)
+
         try {
           await updateQueueItem(action.id, {
             status: 'syncing',
             attempts: action.attempts + 1,
           })
-          await callApi(action)
+          await callApi(action, controller.signal)
+          clearTimeout(timeoutId)
           await removeFromQueue(action.id)
           synced++
         } catch (err) {
+          clearTimeout(timeoutId)
           const apiErr = err instanceof ApiError ? err : null
 
           // 409 = já processado no servidor (outro operador ou double scan).
           // Remove da fila — conta como sync.
-          if (apiErr && apiErr.status === 409) {
+          if (apiErr?.status === 409) {
             await removeFromQueue(action.id).catch(() => {})
             synced++
             continue
           }
 
-          // Erros permanentes do servidor: 400 (payload inválido), 401/403
-          // (auth quebrada), 404 (participant/evento não existe). Retry não
-          // resolveria — dropa da fila com mensagem clara pra não acumular
-          // lixo nem drenar bateria tentando de novo.
-          if (apiErr && PERMANENT_STATUSES.has(apiErr.status)) {
-            await removeFromQueue(action.id).catch(() => {})
+          // 401/403 = token expirado ou sem permissão. NÃO removemos da fila
+          // pra operador perceber que precisa re-logar. Itens ficam visíveis
+          // no painel de erros em Perfil.
+          if (apiErr && (apiErr.status === 401 || apiErr.status === 403)) {
+            await updateQueueItem(action.id, {
+              status: 'failed',
+              error: 'Token expirado — faça login novamente',
+            }).catch(() => {})
             failed++
             continue
           }
 
+          // 404/410 = recurso não existe mais no servidor (participante/evento
+          // deletado). Nada a fazer — remove silenciosamente.
+          if (apiErr && (apiErr.status === 404 || apiErr.status === 410)) {
+            await removeFromQueue(action.id).catch(() => {})
+            synced++
+            continue
+          }
+
+          // 400/422 = payload inválido. Retry não resolve — marca como falha
+          // pra operador ver a mensagem do servidor e poder descartar.
+          if (apiErr && (apiErr.status === 400 || apiErr.status === 422)) {
+            await updateQueueItem(action.id, {
+              status: 'failed',
+              error: apiErr.message || `Erro de validação (${apiErr.status})`,
+            }).catch(() => {})
+            failed++
+            continue
+          }
+
+          // Outros erros (rede, timeout, 5xx) → marca failed, elegível pra retry.
           const msg = humanizeError(err)
           await updateQueueItem(action.id, { status: 'failed', error: msg }).catch(() => {})
           failed++
         }
       }
     } finally {
-      const next = await loadQueue().catch(() => state.queue)
+      syncRunning = false
+      const next = await loadQueue().catch(() => get().queue)
       set({
         syncing: false,
         queue: next,

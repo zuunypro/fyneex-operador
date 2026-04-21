@@ -62,18 +62,13 @@ export function useInventory(eventId: string, options: UseInventoryOptions = {})
   params.set('pageSize', String(pageSize))
 
   return useQuery({
-    queryKey: ['mobile', 'inventory', eventId, { search, status, page, pageSize }],
+    // `online` faz parte da key — mesma razão de useParticipants.
+    queryKey: ['mobile', 'inventory', eventId, { search, status, page, pageSize, online }],
     queryFn: async () => {
       if (online === false) {
         const packet = await loadPacket(eventId)
         if (!packet) {
-          return {
-            items: [],
-            total: 0,
-            page,
-            pageSize,
-            stats: emptyStats(),
-          } as InventoryResponse
+          throw new Error('Sem dados offline pra este evento. Baixe em Perfil → Offline.')
         }
         const all = packet.inventory.items
         const s = search.toLowerCase()

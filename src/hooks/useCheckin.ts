@@ -120,7 +120,10 @@ export function useCheckin() {
       }
     },
 
-    onSettled: (_data, _err, variables) => {
+    onSettled: (data, _err, variables) => {
+      // Se foi queued (sucesso offline), não invalida — queries online vão
+      // falhar offline e exibir erro confuso pro operador.
+      if (data?.queued) return
       queryClient.invalidateQueries({
         queryKey: ['mobile', 'participants', variables.eventId],
       })

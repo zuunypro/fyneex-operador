@@ -51,6 +51,7 @@ export interface PendingAction {
   participantId: string
   instanceIndex?: number
   observation?: string
+  allowNoStock?: boolean
   createdAt: string
   status: 'pending' | 'syncing' | 'synced' | 'failed'
   error?: string

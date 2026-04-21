@@ -1,5 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage'
 import { create } from 'zustand'
+import { useUserStore } from '@/stores/userStore'
 
 export type TabId = 'dashboard' | 'checkin' | 'stock' | 'profile'
 
@@ -31,7 +31,9 @@ export const useNavigationStore = create<NavigationStore>((set) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
   setSelectedEvent: (event) => set({ selectedEvent: event }),
   logout: async () => {
-    try { await AsyncStorage.removeItem('fyneex_mobile_user') } catch { /* ignore */ }
+    // clearUser limpa AsyncStorage + reseta accessHashMirror (token em memória).
+    // Centraliza aqui pra garantir que os dois stores ficam em sincronia.
+    try { await useUserStore.getState().clearUser() } catch { /* ignore */ }
     set({ isLoggedIn: false, selectedEvent: null, activeTab: 'dashboard' })
   },
 }))
