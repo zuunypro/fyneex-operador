@@ -1,5 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '@/services/api'
+import { loadPacket } from '@/services/offline'
+import { useOfflineStore } from '@/stores/offlineStore'
 
 export type InventoryStatus = 'ok' | 'low' | 'out'
 
@@ -45,8 +47,14 @@ interface UseInventoryOptions {
   pageSize?: number
 }
 
+function emptyStats(): InventoryStats {
+  return { total: 0, totalStock: 0, reserved: 0, withdrawn: 0, low: 0, out: 0, ok: 0 }
+}
+
 export function useInventory(eventId: string, options: UseInventoryOptions = {}) {
   const { search = '', status = 'all', page = 0, pageSize = 200 } = options
+  const online = useOfflineStore((s) => s.online)
+
   const params = new URLSearchParams()
   if (search) params.set('search', search)
   if (status !== 'all') params.set('status', status)
@@ -55,10 +63,43 @@ export function useInventory(eventId: string, options: UseInventoryOptions = {})
 
   return useQuery({
     queryKey: ['mobile', 'inventory', eventId, { search, status, page, pageSize }],
-    queryFn: () =>
-      apiGet<InventoryResponse>(`/api/mobile/events/${eventId}/inventory?${params.toString()}`),
+    queryFn: async () => {
+      if (online === false) {
+        const packet = await loadPacket(eventId)
+        if (!packet) {
+          return {
+            items: [],
+            total: 0,
+            page,
+            pageSize,
+            stats: emptyStats(),
+          } as InventoryResponse
+        }
+        const all = packet.inventory.items
+        const s = search.toLowerCase()
+        const filtered = all.filter((i) => {
+          if (status !== 'all' && i.status !== status) return false
+          if (!s) return true
+          return (
+            i.name.toLowerCase().includes(s) ||
+            (i.variant || '').toLowerCase().includes(s) ||
+            (i.sku || '').toLowerCase().includes(s)
+          )
+        })
+        return {
+          items: filtered.slice(page * pageSize, (page + 1) * pageSize),
+          total: filtered.length,
+          page,
+          pageSize,
+          stats: packet.inventory.stats || emptyStats(),
+        } as InventoryResponse
+      }
+      return apiGet<InventoryResponse>(
+        `/api/mobile/events/${eventId}/inventory?${params.toString()}`,
+      )
+    },
     enabled: !!eventId,
-    refetchInterval: 20_000,
+    refetchInterval: online === false ? false : 20_000,
     staleTime: 8_000,
     gcTime: 60_000,
   })

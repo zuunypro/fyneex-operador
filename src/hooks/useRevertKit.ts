@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiPost, ApiError } from '@/services/api'
+import { enqueue, patchParticipantInPacket } from '@/services/offline'
+import { useOfflineStore } from '@/stores/offlineStore'
 import type { MobileParticipant } from './useParticipants'
 
 interface RevertKitPayload {
@@ -13,6 +15,7 @@ interface RevertKitResponse {
   action?: string
   itemsReversed?: number
   participant?: { name: string; ticketName: string }
+  queued?: boolean
 }
 
 interface ParticipantsCache {
@@ -30,8 +33,22 @@ export function useRevertKit() {
   const queryClient = useQueryClient()
 
   return useMutation<RevertKitResponse, Error, RevertKitPayload, RevertContext>({
-    mutationFn: (data: RevertKitPayload) =>
-      apiPost<RevertKitResponse>('/api/mobile/kit/revert', data),
+    mutationFn: async (data: RevertKitPayload) => {
+      const isOnline = useOfflineStore.getState().online !== false
+      if (!isOnline) {
+        await patchParticipantInPacket(data.eventId, data.participantId, undefined, {
+          kitWithdrawnAt: null,
+        })
+        await enqueue({
+          type: 'revert-kit',
+          eventId: data.eventId,
+          participantId: data.participantId,
+        })
+        await useOfflineStore.getState().refreshState()
+        return { success: true, queued: true }
+      }
+      return apiPost<RevertKitResponse>('/api/mobile/kit/revert', data)
+    },
 
     onMutate: async (variables) => {
       await queryClient.cancelQueries({

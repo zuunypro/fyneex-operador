@@ -1,19 +1,25 @@
 import Constants from 'expo-constants'
 import * as Updates from 'expo-updates'
 import { useState } from 'react'
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native'
 import { colors, font, radius } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
+import { useOfflineStore } from '@/stores/offlineStore'
 import { useUserStore } from '@/stores/userStore'
 import { Icon } from '@/components/Icon'
-
-type BadgeTone = 'green' | 'orange' | 'blue'
 
 const APP_VERSION = (Constants.expoConfig?.version as string | undefined) || '1.0.0'
 
 // Defensivo: acessar Updates.channel/updateId pode lançar em builds onde o
-// native module não está pronto (ex: release builds antes do primeiro fetch).
-// Embrulha em try/catch pra não quebrar o import do módulo.
+// native module não está pronto. Envolver em try/catch pra não quebrar o import.
 function safeString(getter: () => string | null | undefined, fallback: string): string {
   try { return getter() || fallback } catch { return fallback }
 }
@@ -23,12 +29,25 @@ const UPDATE_ID = safeString(() => (Updates.updateId || '').slice(0, 8), '—')
 export function ProfilePage() {
   const user = useUserStore((s) => s.user)
   const logout = useNavigationStore((s) => s.logout)
+  const event = useNavigationStore((s) => s.selectedEvent)
+  const packets = useOfflineStore((s) => s.packets)
+  const queue = useOfflineStore((s) => s.queue)
+  const online = useOfflineStore((s) => s.online)
+  const downloading = useOfflineStore((s) => s.downloading)
+  const downloadEvent = useOfflineStore((s) => s.downloadEvent)
+  const deleteEvent = useOfflineStore((s) => s.deleteEvent)
+  const syncNow = useOfflineStore((s) => s.syncNow)
+  const syncing = useOfflineStore((s) => s.syncing)
+
   const [checking, setChecking] = useState(false)
   const [updateReady, setUpdateReady] = useState(false)
 
   const initials = user?.name
     ? user.name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() || '').join('')
     : '?'
+
+  const eventPacket = event ? packets.find((p) => p.eventId === event.id) : undefined
+  const pending = queue.filter((q) => q.status !== 'synced').length
 
   async function checkForUpdate() {
     if (checking) return
@@ -40,7 +59,7 @@ export function ProfilePage() {
         setUpdateReady(true)
         Alert.alert(
           'Atualização baixada',
-          'Uma nova versão foi baixada. Toque em "Aplicar agora" para reiniciar o app na versão nova.',
+          'Uma nova versão foi baixada. Toque em "Aplicar agora" para reiniciar.',
         )
       } else {
         Alert.alert('Sem atualização', 'Você já está na versão mais recente.')
@@ -59,6 +78,56 @@ export function ProfilePage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       Alert.alert('Erro ao reiniciar', msg)
+    }
+  }
+
+  async function handleDownload() {
+    if (!event) {
+      Alert.alert('Selecione um evento', 'Volte ao seletor de eventos e escolha um antes de baixar.')
+      return
+    }
+    if (online === false) {
+      Alert.alert('Sem internet', 'Conecte à internet pra baixar o evento.')
+      return
+    }
+    try {
+      await downloadEvent(event.id)
+      Alert.alert('Pronto', 'Evento disponível offline. Scan + check-in + retirada funcionam sem net.')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      Alert.alert('Falha ao baixar', msg)
+    }
+  }
+
+  async function handleDelete() {
+    if (!event) return
+    Alert.alert(
+      'Apagar dados offline?',
+      'Os scans pendentes sem sync serão perdidos.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Apagar',
+          style: 'destructive',
+          onPress: async () => {
+            await deleteEvent(event.id)
+          },
+        },
+      ],
+    )
+  }
+
+  async function handleSync() {
+    if (syncing) return
+    if (online === false) {
+      Alert.alert('Sem internet', 'Espere voltar online.')
+      return
+    }
+    const res = await syncNow()
+    if (res.failed > 0) {
+      Alert.alert('Sync parcial', `${res.synced} OK, ${res.failed} falharam. Tente de novo.`)
+    } else if (res.synced > 0) {
+      Alert.alert('Sincronizado', `${res.synced} escaneamento${res.synced === 1 ? '' : 's'} enviado${res.synced === 1 ? '' : 's'}.`)
     }
   }
 
@@ -81,14 +150,102 @@ export function ProfilePage() {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Conta</Text>
+        {/* ── Offline ─────────────────────────────────────────────────── */}
+        <Text style={styles.sectionTitle}>Modo offline</Text>
 
         <View style={styles.list}>
-          <SettingRow icon="manage_accounts" badge="green" label="Configurações da Conta" />
-          <SettingRow icon="notifications_active" badge="blue" label="Notificações" />
-          <SettingRow icon="shield" badge="orange" label="Privacidade e Segurança" last />
+          {downloading ? (
+            <View style={styles.row}>
+              <View style={styles.rowLeft}>
+                <View style={[styles.rowIconBox, { backgroundColor: colors.accentGreenBg, borderColor: colors.accentGreenDim }]}>
+                  <ActivityIndicator size="small" color={colors.accentGreen} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.rowLabel} numberOfLines={1}>
+                    {downloading.progress.message}
+                  </Text>
+                  <View style={styles.progressTrack}>
+                    <View style={[styles.progressFill, { width: `${downloading.progress.percent}%` }]} />
+                  </View>
+                </View>
+              </View>
+            </View>
+          ) : (
+            <Pressable
+              onPress={handleDownload}
+              style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+              disabled={!event}
+            >
+              <View style={styles.rowLeft}>
+                <View style={[styles.rowIconBox, { backgroundColor: colors.accentGreenBg, borderColor: colors.accentGreenDim }]}>
+                  <Icon name="arrow_downward" size={20} color={colors.accentGreen} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.rowLabel} numberOfLines={1}>
+                    {eventPacket ? 'Baixar novamente' : 'Baixar este evento'}
+                  </Text>
+                  <Text style={styles.rowSubLabel} numberOfLines={1}>
+                    {!event
+                      ? 'Selecione um evento primeiro'
+                      : eventPacket
+                        ? `${eventPacket.participantCount} participantes · ${eventPacket.itemCount} itens`
+                        : 'Baixa participantes + inventário pra scan offline'}
+                  </Text>
+                </View>
+              </View>
+              <Icon name="chevron_right" size={16} color={colors.borderDefault} />
+            </Pressable>
+          )}
+
+          {pending > 0 ? (
+            <Pressable
+              onPress={handleSync}
+              disabled={syncing || online === false}
+              style={({ pressed }) => [styles.row, styles.rowBorder, pressed && styles.rowPressed]}
+            >
+              <View style={styles.rowLeft}>
+                <View style={[styles.rowIconBox, { backgroundColor: colors.accentOrangeBg, borderColor: colors.accentOrangeBorder }]}>
+                  {syncing ? (
+                    <ActivityIndicator size="small" color={colors.accentOrange} />
+                  ) : (
+                    <Icon name="schedule" size={20} color={colors.accentOrange} />
+                  )}
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.rowLabel} numberOfLines={1}>
+                    {syncing ? 'Sincronizando...' : 'Sincronizar agora'}
+                  </Text>
+                  <Text style={styles.rowSubLabel} numberOfLines={1}>
+                    {pending} escaneamento{pending === 1 ? '' : 's'} pendente{pending === 1 ? '' : 's'}
+                  </Text>
+                </View>
+              </View>
+              <Icon name="chevron_right" size={16} color={colors.borderDefault} />
+            </Pressable>
+          ) : null}
+
+          {eventPacket ? (
+            <Pressable
+              onPress={handleDelete}
+              style={({ pressed }) => [styles.row, styles.rowBorder, pressed && styles.rowPressed]}
+            >
+              <View style={styles.rowLeft}>
+                <View style={[styles.rowIconBox, { backgroundColor: colors.accentRedBg, borderColor: colors.accentRedBorder }]}>
+                  <Icon name="close" size={20} color={colors.accentRed} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.rowLabel} numberOfLines={1}>Apagar dados offline</Text>
+                  <Text style={styles.rowSubLabel} numberOfLines={1}>
+                    Libera espaço. Scans pendentes são perdidos.
+                  </Text>
+                </View>
+              </View>
+              <Icon name="chevron_right" size={16} color={colors.borderDefault} />
+            </Pressable>
+          ) : null}
         </View>
 
+        {/* ── Atualizações ──────────────────────────────────────────── */}
         <Text style={styles.sectionTitle}>Atualizações</Text>
 
         <View style={styles.list}>
@@ -146,43 +303,6 @@ export function ProfilePage() {
       </View>
     </ScrollView>
   )
-}
-
-function SettingRow({
-  icon,
-  badge,
-  label,
-  last,
-}: {
-  icon: string
-  badge: BadgeTone
-  label: string
-  last?: boolean
-}) {
-  const theme = BADGE_COLORS[badge]
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.row,
-        !last && styles.rowBorder,
-        pressed && styles.rowPressed,
-      ]}
-    >
-      <View style={styles.rowLeft}>
-        <View style={[styles.rowIconBox, { backgroundColor: theme.bg, borderColor: theme.border }]}>
-          <Icon name={icon} size={20} color={theme.color} />
-        </View>
-        <Text style={styles.rowLabel} numberOfLines={1}>{label}</Text>
-      </View>
-      <Icon name="chevron_right" size={16} color={colors.borderDefault} />
-    </Pressable>
-  )
-}
-
-const BADGE_COLORS: Record<BadgeTone, { bg: string; color: string; border: string }> = {
-  green: { bg: colors.accentGreenBg, color: colors.accentGreen, border: colors.accentGreenDim },
-  orange: { bg: colors.accentOrangeBg, color: colors.accentOrange, border: colors.accentOrangeBorder },
-  blue: { bg: colors.accentBlueBg, color: colors.accentBlue, border: colors.borderDefault },
 }
 
 const styles = StyleSheet.create({
@@ -278,8 +398,8 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   rowBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderMuted,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderMuted,
   },
   rowPressed: {
     backgroundColor: colors.bgElevated,
@@ -300,7 +420,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   rowLabel: {
-    flex: 1,
     fontSize: 13,
     fontWeight: font.weight.semibold,
     color: colors.textPrimary,
@@ -310,6 +429,17 @@ const styles = StyleSheet.create({
     fontWeight: font.weight.medium,
     color: colors.textTertiary,
     marginTop: 2,
+  },
+  progressTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.borderMuted,
+    overflow: 'hidden',
+    marginTop: 6,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: colors.accentGreen,
   },
   logoutButton: {
     flexDirection: 'row',

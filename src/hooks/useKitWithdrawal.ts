@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiPost, ApiError } from '@/services/api'
+import { enqueue, patchParticipantInPacket } from '@/services/offline'
+import { useOfflineStore } from '@/stores/offlineStore'
 import type { MobileParticipant } from './useParticipants'
 
 interface WithdrawalPayload {
@@ -24,6 +26,7 @@ interface WithdrawalResponse {
   }
   warning?: string
   participant?: { name: string; ticketName: string }
+  queued?: boolean
 }
 
 interface ParticipantsCache {
@@ -47,8 +50,23 @@ export function useKitWithdrawal() {
   const queryClient = useQueryClient()
 
   return useMutation<WithdrawalResponse, Error, WithdrawalPayload, WithdrawalContext>({
-    mutationFn: (data: WithdrawalPayload) =>
-      apiPost<WithdrawalResponse>('/api/mobile/checkin', { ...data, mode: 'withdrawal' }),
+    mutationFn: async (data: WithdrawalPayload) => {
+      const isOnline = useOfflineStore.getState().online !== false
+      if (!isOnline) {
+        await patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
+          kitWithdrawnAt: new Date().toISOString(),
+        })
+        await enqueue({
+          type: 'withdrawal',
+          eventId: data.eventId,
+          participantId: data.participantId,
+          instanceIndex: data.instanceIndex,
+        })
+        await useOfflineStore.getState().refreshState()
+        return { success: true, queued: true }
+      }
+      return apiPost<WithdrawalResponse>('/api/mobile/checkin', { ...data, mode: 'withdrawal' })
+    },
 
     onMutate: async (variables) => {
       await queryClient.cancelQueries({

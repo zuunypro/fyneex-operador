@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiPost, ApiError } from '@/services/api'
+import { enqueue, patchParticipantInPacket } from '@/services/offline'
+import { useOfflineStore } from '@/stores/offlineStore'
 import type { MobileParticipant } from './useParticipants'
 
 interface RevertCheckinPayload {
@@ -15,6 +17,7 @@ interface RevertCheckinResponse {
   instanceIndex?: number
   allValidated?: boolean
   participant?: { name: string; ticketName: string }
+  queued?: boolean
 }
 
 interface ParticipantsCache {
@@ -38,12 +41,29 @@ export function useRevertCheckin() {
   const queryClient = useQueryClient()
 
   return useMutation<RevertCheckinResponse, Error, RevertCheckinPayload, RevertContext>({
-    mutationFn: (data: RevertCheckinPayload) => {
+    mutationFn: async (data: RevertCheckinPayload) => {
       const payload: RevertCheckinPayload = {
         participantId: data.participantId,
         eventId: data.eventId,
       }
       if (data.instanceIndex !== undefined) payload.instanceIndex = data.instanceIndex
+
+      const isOnline = useOfflineStore.getState().online !== false
+      if (!isOnline) {
+        await patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
+          status: 'pending',
+          checkedInAt: null,
+        })
+        await enqueue({
+          type: 'revert-checkin',
+          eventId: data.eventId,
+          participantId: data.participantId,
+          instanceIndex: data.instanceIndex,
+        })
+        await useOfflineStore.getState().refreshState()
+        return { success: true, queued: true }
+      }
+
       return apiPost<RevertCheckinResponse>('/api/mobile/checkin/revert', payload)
     },
 

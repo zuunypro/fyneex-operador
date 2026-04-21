@@ -10,6 +10,7 @@ import { AppShell } from '@/components/AppShell'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { colors } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
+import { useOfflineStore } from '@/stores/offlineStore'
 import { loadUserFromStorage, useUserStore } from '@/stores/userStore'
 import { LoginPage } from '@/pages/LoginPage'
 import { EventSelectorPage } from '@/pages/EventSelectorPage'
@@ -59,11 +60,12 @@ function AppRouter() {
   const selectedEvent = useNavigationStore((s) => s.selectedEvent)
   const setIsLoggedIn = useNavigationStore((s) => s.setIsLoggedIn)
   const setUser = useUserStore((s) => s.setUser)
+  const hydrateOffline = useOfflineStore((s) => s.hydrate)
   const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
     let alive = true
-    loadUserFromStorage().then((user) => {
+    Promise.all([loadUserFromStorage(), hydrateOffline()]).then(([user]) => {
       if (!alive) return
       if (user) {
         setUser(user)

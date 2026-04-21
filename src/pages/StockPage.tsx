@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import {
   ActivityIndicator,
   FlatList,
@@ -15,7 +15,6 @@ import { useNavigationStore } from '@/stores/navigationStore'
 import { useParticipants, type MobileParticipant } from '@/hooks/useParticipants'
 import { useKitWithdrawal } from '@/hooks/useKitWithdrawal'
 import { useRevertKit } from '@/hooks/useRevertKit'
-import { useDeliveredKits } from '@/hooks/useDeliveredKits'
 import { useInventory } from '@/hooks/useInventory'
 import { useToast } from '@/hooks/useToast'
 import { groupByOrder, matchParticipant, type GroupInfo } from '@/utils/participants'
@@ -54,7 +53,6 @@ export function StockPage() {
   const { data, isLoading, isFetching, isError, refetch } = useParticipants(event.id, { pageSize: 500 })
   const withdrawMutation = useKitWithdrawal()
   const revertMutation = useRevertKit()
-  const delivered = useDeliveredKits(event.id)
   const inventory = useInventory(event.id)
 
   const participants = useMemo(() => {
@@ -63,14 +61,13 @@ export function StockPage() {
     return allHaveFlag ? all.filter((p) => p.hasKit) : all
   }, [data?.participants])
 
-  useEffect(() => {
-    if (!data?.participants) return
-    delivered.pruneTo(data.participants.map((p) => p.id))
-  }, [data?.participants, delivered])
-
+  // Truth unica: kitWithdrawnAt do servidor (onMutate do useKitWithdrawal ja
+  // seta otimista). Antes usavamos tambem um Set local persistido — isso
+  // causava "100%" errado quando sessoes antigas deixavam IDs como entregues
+  // e o servidor tinha revertido no meantime.
   const isDelivered = useCallback(
-    (p: MobileParticipant) => Boolean(p.kitWithdrawnAt) || delivered.has(p.id),
-    [delivered],
+    (p: MobileParticipant) => Boolean(p.kitWithdrawnAt),
+    [],
   )
 
   const filtered = useMemo(() => {
@@ -113,7 +110,6 @@ export function StockPage() {
         eventId: event.id,
         instanceIndex: p.instanceIndex,
       })
-      delivered.add(p.id)
       const firstErr = res?.kit?.errors?.[0]
       if (firstErr) {
         showToast(`Entregue parcial: ${firstErr.message}`, 'error')
@@ -124,7 +120,6 @@ export function StockPage() {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        delivered.add(p.id)
         showToast('Kit já havia sido retirado', 'success')
       } else if (err instanceof ApiError) {
         showToast(err.message, 'error')
@@ -141,11 +136,9 @@ export function StockPage() {
         participantId: p.participantId,
         eventId: event.id,
       })
-      delivered.remove(p.id)
       showToast('Retirada revertida', 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        delivered.remove(p.id)
         showToast('Nenhuma retirada para reverter', 'success')
       } else if (err instanceof ApiError) {
         showToast(err.message, 'error')
@@ -240,19 +233,17 @@ export function StockPage() {
         eventId: event.id,
         instanceIndex: target.instanceIndex,
       })
-      delivered.add(target.id)
       setContinuousCount((n) => n + 1)
       const firstErr = res?.kit?.errors?.[0]
       if (firstErr) { feedbackBad(); showToast(`Parcial: ${firstErr.message}`, 'error') }
       else showToast(`${target.name} ✓`, 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        delivered.add(target.id)
         showToast(`${target.name} já retirou`, 'success')
       } else if (err instanceof ApiError) { feedbackBad(); showToast(err.message, 'error') }
       else { feedbackBad(); showToast('Erro ao entregar kit', 'error') }
     }
-  }, [participants, withdrawMutation, event.id, isDelivered, delivered, showToast])
+  }, [participants, withdrawMutation, event.id, isDelivered, showToast])
 
   if (scannerOpen) {
     return (

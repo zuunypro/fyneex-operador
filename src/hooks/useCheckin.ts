@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiPost, ApiError } from '@/services/api'
+import { enqueue, patchParticipantInPacket } from '@/services/offline'
+import { useOfflineStore } from '@/stores/offlineStore'
 import type { MobileParticipant } from './useParticipants'
 
 interface CheckinPayload {
@@ -20,6 +22,7 @@ interface CheckinResponse {
     name: string
     ticketName: string
   }
+  queued?: boolean
 }
 
 interface ParticipantsCache {
@@ -43,7 +46,7 @@ export function useCheckin() {
   const queryClient = useQueryClient()
 
   return useMutation<CheckinResponse, Error, CheckinPayload, CheckinContext>({
-    mutationFn: (data: CheckinPayload) => {
+    mutationFn: async (data: CheckinPayload) => {
       const payload: CheckinPayload = {
         participantId: data.participantId,
         eventId: data.eventId,
@@ -52,6 +55,26 @@ export function useCheckin() {
       if (data.observation && data.observation.trim()) {
         payload.observation = data.observation.trim().slice(0, 500)
       }
+
+      const isOnline = useOfflineStore.getState().online !== false
+      if (!isOnline) {
+        await patchParticipantInPacket(
+          data.eventId,
+          data.participantId,
+          data.instanceIndex,
+          { status: 'checked', checkedInAt: new Date().toISOString() },
+        )
+        await enqueue({
+          type: 'checkin',
+          eventId: data.eventId,
+          participantId: data.participantId,
+          instanceIndex: data.instanceIndex,
+          observation: payload.observation,
+        })
+        await useOfflineStore.getState().refreshState()
+        return { success: true, queued: true }
+      }
+
       return apiPost<CheckinResponse>('/api/mobile/checkin', payload)
     },
 
