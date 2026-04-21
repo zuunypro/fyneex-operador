@@ -1,0 +1,65 @@
+{
+  "expo": {
+    "name": "FYNEEX Operador",
+    "slug": "fyneex-operador",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "fyneex",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#111111",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#111111"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.fyneex.operador",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Este app precisa da câmera para ler os QR codes dos participantes no check-in."
+      }
+    },
+    "android": {
+      "package": "com.fyneex.operador",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#111111"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.INTERNET",
+        "android.permission.VIBRATE",
+        "android.permission.REQUEST_INSTALL_PACKAGES",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Este app precisa da câmera para ler os QR codes dos participantes no check-in.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ]
+    ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/a0f2ec89-ed24-468b-b5df-43ee1e82066e"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "a0f2ec89-ed24-468b-b5df-43ee1e82066e"
+      }
+    },
+    "owner": "zuuny"
+  }
+}

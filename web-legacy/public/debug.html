@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Debug — fyx-go</title>
+  <style>
+    :root { color-scheme: dark }
+    body {
+      margin: 0; padding: 20px; max-width: 560px; margin-inline: auto;
+      font: 14px/1.4 -apple-system, system-ui, sans-serif;
+      background: #111; color: #e8e8e8;
+    }
+    h1 { font-size: 18px; margin: 0 0 4px }
+    .muted { color: #8a8a8a; font-size: 12px }
+    button {
+      appearance: none; width: 100%; padding: 12px 14px; margin-top: 10px;
+      border-radius: 10px; border: 1px solid #3fb950; background: #238636;
+      color: #fff; font-weight: 700; font-size: 14px; cursor: pointer;
+    }
+    pre {
+      background: #1a1a1a; border: 1px solid #333; border-radius: 10px;
+      padding: 12px; overflow: auto; font-size: 12px; white-space: pre-wrap;
+      word-break: break-word; margin-top: 10px;
+    }
+    .row { display: flex; gap: 10px; margin-top: 10px }
+    input {
+      flex: 1; padding: 10px 12px; border-radius: 10px;
+      background: #1a1a1a; border: 1px solid #333; color: #e8e8e8; font: inherit;
+    }
+    code { background: #1a1a1a; padding: 2px 6px; border-radius: 4px }
+  </style>
+</head>
+<body>
+  <h1>fyx-go · debug</h1>
+  <p class="muted">
+    Origin: <code id="origin"></code><br>
+    User-Agent: <code id="ua"></code>
+  </p>
+
+  <button id="gt">GET /api/mobile/events</button>
+  <button id="pt">POST /api/mobile/login (dummy)</button>
+
+  <div class="row">
+    <input id="email" type="email" placeholder="e-mail" autocapitalize="none" autocomplete="username" />
+    <input id="pass"  type="password" placeholder="senha" autocomplete="current-password" />
+  </div>
+  <button id="login">Tentar login real</button>
+
+  <pre id="out">Aguardando…</pre>
+
+  <script>
+    const out = document.getElementById('out')
+    document.getElementById('origin').textContent = location.origin
+    document.getElementById('ua').textContent = navigator.userAgent
+
+    function log(label, obj) {
+      const time = new Date().toLocaleTimeString()
+      const body = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2)
+      out.textContent += '\n\n[' + time + '] ' + label + '\n' + body
+      out.scrollTop = out.scrollHeight
+    }
+
+    async function probe(method, path, body) {
+      const url = location.origin + path
+      log('→ ' + method + ' ' + url, body ? { body } : '')
+      const started = performance.now()
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: body ? { 'content-type': 'application/json' } : {},
+          body: body ? JSON.stringify(body) : undefined,
+        })
+        const took = (performance.now() - started).toFixed(0) + 'ms'
+        const headers = {}
+        res.headers.forEach((v, k) => { headers[k] = v })
+        const text = await res.text().catch(() => '<unreadable>')
+        log('← ' + res.status + ' ' + res.statusText + ' (' + took + ')', { headers, body: text.slice(0, 500) })
+      } catch (err) {
+        const took = (performance.now() - started).toFixed(0) + 'ms'
+        log('⚠ fetch rejeitou (' + took + ')', {
+          name: err && err.name,
+          message: err && err.message,
+          stack: (err && err.stack || '').split('\n').slice(0, 5).join('\n'),
+        })
+      }
+    }
+
+    document.getElementById('gt').onclick = () => { out.textContent = ''; probe('GET', '/api/mobile/events') }
+    document.getElementById('pt').onclick = () => { out.textContent = ''; probe('POST', '/api/mobile/login', { email: 'debug@debug', password: 'x' }) }
+    document.getElementById('login').onclick = () => {
+      out.textContent = ''
+      probe('POST', '/api/mobile/login', {
+        email: document.getElementById('email').value,
+        password: document.getElementById('pass').value,
+      })
+    }
+  </script>
+</body>
+</html>

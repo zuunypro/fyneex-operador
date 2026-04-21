@@ -1,0 +1,46 @@
+# OSX
+.DS_Store
+
+# node
+node_modules/
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# Native
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+android/app/build/
+android/build/
+ios/Pods/
+ios/build/
+
+# Metro
+.metro-health-check*
+
+# Local env
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Logs
+*.log
+
+# Legacy (web version, preserved for reference)
+web-legacy/node_modules/
+web-legacy/dist/
+web-legacy/.vercel/

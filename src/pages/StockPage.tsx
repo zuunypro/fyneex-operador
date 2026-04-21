@@ -1,0 +1,1062 @@
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native'
+import { colors, font, radius } from '@/theme'
+import { ApiError } from '@/services/api'
+import { useNavigationStore } from '@/stores/navigationStore'
+import { useParticipants, type MobileParticipant } from '@/hooks/useParticipants'
+import { useKitWithdrawal } from '@/hooks/useKitWithdrawal'
+import { useRevertKit } from '@/hooks/useRevertKit'
+import { useDeliveredKits } from '@/hooks/useDeliveredKits'
+import { useInventory } from '@/hooks/useInventory'
+import { useToast } from '@/hooks/useToast'
+import { groupByOrder, matchParticipant, type GroupInfo } from '@/utils/participants'
+import { feedbackBad, feedbackOk } from '@/utils/feedback'
+import { QRScanner, type ScannedToken } from '@/components/QRScanner'
+import { InstanceSelectorModal } from '@/components/InstanceSelectorModal'
+import { ConfirmationModal } from '@/components/ConfirmationModal'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { Toast } from '@/components/Toast'
+import { Icon } from '@/components/Icon'
+
+type FilterId = 'all' | 'pending' | 'delivered'
+
+const FILTERS: { id: FilterId; label: string }[] = [
+  { id: 'all', label: 'Todos' },
+  { id: 'pending', label: 'Pendentes' },
+  { id: 'delivered', label: 'Entregues' },
+]
+
+export function StockPage() {
+  const event = useNavigationStore((s) => s.selectedEvent)!
+  const setSelectedEvent = useNavigationStore((s) => s.setSelectedEvent)
+
+  const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState<FilterId>('all')
+  const [modalParticipant, setModalParticipant] = useState<MobileParticipant | null>(null)
+  const [pendingScanGroup, setPendingScanGroup] = useState<MobileParticipant[] | null>(null)
+  const [scannerOpen, setScannerOpen] = useState(false)
+  const [continuousScan, setContinuousScan] = useState(false)
+  const [continuousCount, setContinuousCount] = useState(0)
+  const [alreadyScanned, setAlreadyScanned] = useState<MobileParticipant | null>(null)
+  const [revertTarget, setRevertTarget] = useState<MobileParticipant | null>(null)
+  const [showInventorySummary, setShowInventorySummary] = useState(false)
+
+  const { toast, show: showToast } = useToast()
+  const { data, isLoading, isFetching, isError, refetch } = useParticipants(event.id, { pageSize: 500 })
+  const withdrawMutation = useKitWithdrawal()
+  const revertMutation = useRevertKit()
+  const delivered = useDeliveredKits(event.id)
+  const inventory = useInventory(event.id)
+
+  const participants = useMemo(() => {
+    const all = data?.participants || []
+    const allHaveFlag = all.length > 0 && all.every((p) => typeof p.hasKit === 'boolean')
+    return allHaveFlag ? all.filter((p) => p.hasKit) : all
+  }, [data?.participants])
+
+  useEffect(() => {
+    if (!data?.participants) return
+    delivered.pruneTo(data.participants.map((p) => p.id))
+  }, [data?.participants, delivered])
+
+  const isDelivered = useCallback(
+    (p: MobileParticipant) => Boolean(p.kitWithdrawnAt) || delivered.has(p.id),
+    [delivered],
+  )
+
+  const filtered = useMemo(() => {
+    const s = search.toLowerCase()
+    return participants.filter((p) => {
+      if (!matchParticipant(p, s)) return false
+      const done = isDelivered(p)
+      if (filter === 'all') return true
+      if (filter === 'pending') return !done
+      return done
+    })
+  }, [participants, search, filter, isDelivered])
+
+  const counts = useMemo(() => {
+    let deliveredCount = 0
+    for (const p of participants) if (isDelivered(p)) deliveredCount++
+    return {
+      all: participants.length,
+      pending: participants.length - deliveredCount,
+      delivered: deliveredCount,
+    }
+  }, [participants, isDelivered])
+
+  const grouped = useMemo(() => groupByOrder(filtered), [filtered])
+
+  const inventorySummary = useMemo(() => {
+    const items = inventory.data?.items || []
+    if (items.length === 0) return null
+    const low = items.filter((i) => i.status === 'low')
+    const out = items.filter((i) => i.status === 'out')
+    return { items, low, out }
+  }, [inventory.data?.items])
+
+  async function handleWithdraw(p: MobileParticipant) {
+    if (withdrawMutation.isPending) return
+    setModalParticipant(null)
+    try {
+      const res = await withdrawMutation.mutateAsync({
+        participantId: p.participantId,
+        eventId: event.id,
+        instanceIndex: p.instanceIndex,
+      })
+      delivered.add(p.id)
+      const firstErr = res?.kit?.errors?.[0]
+      if (firstErr) {
+        showToast(`Entregue parcial: ${firstErr.message}`, 'error')
+      } else if (res?.implicitCheckIn) {
+        showToast('Kit entregue e check-in validado!', 'success')
+      } else {
+        showToast('Kit entregue!', 'success')
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        delivered.add(p.id)
+        showToast('Kit já havia sido retirado', 'success')
+      } else if (err instanceof ApiError) {
+        showToast(err.message, 'error')
+      } else {
+        showToast('Erro ao entregar kit', 'error')
+      }
+    }
+  }
+
+  async function executeRevertKit(p: MobileParticipant) {
+    setRevertTarget(null)
+    try {
+      await revertMutation.mutateAsync({
+        participantId: p.participantId,
+        eventId: event.id,
+      })
+      delivered.remove(p.id)
+      showToast('Retirada revertida', 'success')
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        delivered.remove(p.id)
+        showToast('Nenhuma retirada para reverter', 'success')
+      } else if (err instanceof ApiError) {
+        showToast(err.message, 'error')
+      } else {
+        showToast('Erro ao reverter retirada', 'error')
+      }
+    }
+  }
+
+  async function handleScan(token: ScannedToken) {
+    const matches = participants.filter((p) => p.participantId === token.participantId)
+    if (matches.length > 0) {
+      const stillPending = matches
+        .filter((p) => !isDelivered(p))
+        .sort((a, b) => (a.instanceIndex ?? 0) - (b.instanceIndex ?? 0))
+      if (stillPending.length === 0) {
+        const target = matches.find((p) => isDelivered(p)) || matches[0]
+        setScannerOpen(false)
+        setAlreadyScanned(target)
+        return
+      }
+      if (stillPending.length > 1) {
+        setScannerOpen(false)
+        setPendingScanGroup(stillPending)
+        return
+      }
+      setScannerOpen(false)
+      setModalParticipant(stillPending[0])
+      return
+    }
+    setScannerOpen(false)
+    try {
+      const res = await withdrawMutation.mutateAsync({
+        participantId: token.participantId,
+        eventId: event.id,
+      })
+      const firstErr = res?.kit?.errors?.[0]
+      if (firstErr) {
+        showToast(`Entregue parcial: ${firstErr.message}`, 'error')
+      } else if (res?.implicitCheckIn) {
+        showToast('Kit entregue e check-in validado!', 'success')
+      } else {
+        showToast('Kit entregue!', 'success')
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        showToast('Kit já havia sido retirado', 'success')
+      } else if (err instanceof ApiError) {
+        showToast(err.message, 'error')
+      } else {
+        showToast('Erro ao entregar kit', 'error')
+      }
+    }
+  }
+
+  const handleContinuousScan = useCallback(async (token: ScannedToken) => {
+    const matches = participants.filter((p) => p.participantId === token.participantId)
+    if (matches.length === 0) {
+      try {
+        const res = await withdrawMutation.mutateAsync({
+          participantId: token.participantId,
+          eventId: event.id,
+        })
+        setContinuousCount((n) => n + 1)
+        const firstErr = res?.kit?.errors?.[0]
+        if (firstErr) { feedbackBad(); showToast(`Parcial: ${firstErr.message}`, 'error') }
+        else showToast('Kit entregue', 'success')
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) showToast('Kit já retirado', 'success')
+        else if (err instanceof ApiError) { feedbackBad(); showToast(err.message, 'error') }
+        else { feedbackBad(); showToast('Erro ao entregar kit', 'error') }
+      }
+      return
+    }
+    const stillPending = matches
+      .filter((p) => !isDelivered(p))
+      .sort((a, b) => (a.instanceIndex ?? 0) - (b.instanceIndex ?? 0))
+    if (stillPending.length === 0) {
+      const target = matches.find((p) => isDelivered(p)) || matches[0]
+      showToast(`${target.name} já retirou`, 'success')
+      return
+    }
+    if (stillPending.length > 1) {
+      setScannerOpen(false)
+      setPendingScanGroup(stillPending)
+      return
+    }
+    const target = stillPending[0]
+    try {
+      const res = await withdrawMutation.mutateAsync({
+        participantId: target.participantId,
+        eventId: event.id,
+        instanceIndex: target.instanceIndex,
+      })
+      delivered.add(target.id)
+      setContinuousCount((n) => n + 1)
+      const firstErr = res?.kit?.errors?.[0]
+      if (firstErr) { feedbackBad(); showToast(`Parcial: ${firstErr.message}`, 'error') }
+      else showToast(`${target.name} ✓`, 'success')
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        delivered.add(target.id)
+        showToast(`${target.name} já retirou`, 'success')
+      } else if (err instanceof ApiError) { feedbackBad(); showToast(err.message, 'error') }
+      else { feedbackBad(); showToast('Erro ao entregar kit', 'error') }
+    }
+  }, [participants, withdrawMutation, event.id, isDelivered, delivered, showToast])
+
+  if (scannerOpen) {
+    return (
+      <QRScanner
+        expectedEventId={event.id}
+        title={event.name}
+        subtitle={continuousScan
+          ? 'Modo contínuo · retirada'
+          : 'Retirada de kit · aponte para o QR'}
+        onClose={() => setScannerOpen(false)}
+        onScan={continuousScan ? handleContinuousScan : handleScan}
+        continuous={continuousScan}
+        onContinuousChange={(next) => {
+          setContinuousScan(next)
+          if (!next) setContinuousCount(0)
+        }}
+        statusHint={continuousCount > 0 ? `${continuousCount} retirados` : 'Contínuo'}
+      />
+    )
+  }
+
+  return (
+    <View style={styles.root}>
+      <View style={styles.header}>
+        <Pressable onPress={() => setSelectedEvent(null)} style={styles.swapButton}>
+          <Icon name="swap_horiz" size={20} color={colors.textSecondary} />
+        </Pressable>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.eventName} numberOfLines={1}>{event.name}</Text>
+          <Text style={styles.eventCaption}>Retirada de Kit</Text>
+        </View>
+        <View style={styles.liveBadge}>
+          <View
+            style={[
+              styles.liveDot,
+              { backgroundColor: isFetching ? colors.accentGreen : colors.textTertiary },
+            ]}
+          />
+          <Text
+            style={[
+              styles.liveLabel,
+              { color: isFetching ? colors.accentGreen : colors.textPrimary },
+            ]}
+          >
+            Ao Vivo
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.stats}>
+        <StatCell value={counts.delivered} label="Entregues" />
+        <View style={styles.statDivider} />
+        <StatCell value={counts.pending} label="Pendentes" valueColor={colors.accentOrange} />
+        <View style={styles.statDivider} />
+        <StatCell
+          value={counts.all > 0 ? `${Math.round((counts.delivered / counts.all) * 100)}%` : '0%'}
+          label="Taxa"
+        />
+      </View>
+
+      {inventorySummary && inventorySummary.items.length > 0 ? (
+        <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
+          <Pressable
+            onPress={() => setShowInventorySummary((v) => !v)}
+            style={styles.inventoryPill}
+          >
+            <Icon
+              name="inventory_2"
+              size={16}
+              color={inventorySummary.out.length > 0 ? colors.accentRed : colors.textSecondary}
+            />
+            <Text style={styles.inventoryPillLabel} numberOfLines={1}>
+              {inventorySummary.items.length} itens
+              {inventorySummary.out.length > 0 ? ` · ${inventorySummary.out.length} esgotado(s)` : ''}
+              {inventorySummary.low.length > 0 ? ` · ${inventorySummary.low.length} baixo(s)` : ''}
+            </Text>
+            <Icon
+              name="expand_more"
+              size={18}
+              color={colors.textTertiary}
+              style={{ transform: [{ rotate: showInventorySummary ? '180deg' : '0deg' }] }}
+            />
+          </Pressable>
+
+          {showInventorySummary ? (
+            <View style={styles.inventoryPanel}>
+              {inventorySummary.items.map((item) => {
+                const tone =
+                  item.status === 'out' ? styles.inventoryRowOut
+                  : item.status === 'low' ? styles.inventoryRowLow
+                  : styles.inventoryRowOk
+                return (
+                  <View key={item.id} style={[styles.inventoryRow, tone]}>
+                    <Text style={styles.inventoryName} numberOfLines={1}>
+                      {item.name}{item.variant ? ` · ${item.variant}` : ''}
+                    </Text>
+                    <Text style={styles.inventoryStock}>
+                      {item.currentStock}/{item.currentStock + item.withdrawnStock}
+                    </Text>
+                  </View>
+                )
+              })}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      <View style={styles.searchRow}>
+        <View style={styles.searchBox}>
+          <Icon name="search" size={20} color={colors.textTertiary} />
+          <TextInput
+            placeholder="Buscar por nome, ID ou pedido..."
+            placeholderTextColor={colors.textTertiary}
+            value={search}
+            onChangeText={setSearch}
+            style={styles.searchInput}
+            autoCorrect={false}
+            autoCapitalize="none"
+            returnKeyType="search"
+          />
+          {search ? (
+            <Pressable onPress={() => setSearch('')} hitSlop={8}>
+              <Icon name="close" size={18} color={colors.textTertiary} />
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+
+      <View style={styles.filtersRow}>
+        {FILTERS.map((f) => {
+          const active = filter === f.id
+          const count = counts[f.id]
+          return (
+            <Pressable
+              key={f.id}
+              onPress={() => setFilter(f.id)}
+              style={[styles.filterChip, active && styles.filterChipActive]}
+            >
+              <Text style={[styles.filterLabel, active && styles.filterLabelActive]}>
+                {f.label}
+              </Text>
+              <View style={[styles.filterCountBox, active && styles.filterCountBoxActive]}>
+                <Text style={[styles.filterCountLabel, active && styles.filterCountLabelActive]}>
+                  {count}
+                </Text>
+              </View>
+            </Pressable>
+          )
+        })}
+        <Pressable onPress={() => refetch()} style={styles.refreshButton}>
+          <Icon name="refresh" size={14} color={colors.textTertiary} />
+        </Pressable>
+      </View>
+
+      {isError && !isLoading ? (
+        <View style={styles.errorCard}>
+          <Icon name="wifi_off" size={36} color={colors.accentRed} />
+          <Text style={styles.errorTitle}>Erro ao carregar participantes</Text>
+          <Pressable onPress={() => refetch()} style={styles.retryButton}>
+            <Text style={styles.retryLabel}>Tentar novamente</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <FlatList
+          data={grouped.items}
+          keyExtractor={(p) => p.id}
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          renderItem={({ item }) => (
+            <KitRow
+              participant={item}
+              group={grouped.groupOf.get(item.id)}
+              delivered={isDelivered(item)}
+              isPending={
+                withdrawMutation.isPending &&
+                withdrawMutation.variables?.participantId === item.participantId &&
+                withdrawMutation.variables?.instanceIndex === item.instanceIndex
+              }
+              isReverting={
+                revertMutation.isPending &&
+                revertMutation.variables?.participantId === item.participantId
+              }
+              onWithdraw={() => setModalParticipant(item)}
+              onRevert={() => setRevertTarget(item)}
+            />
+          )}
+          ListEmptyComponent={
+            isLoading ? null : (
+              <View style={styles.emptyCard}>
+                <Icon name="person_search" size={36} color={colors.borderDefault} />
+                <Text style={styles.emptyLabel}>Nenhum participante encontrado</Text>
+              </View>
+            )
+          }
+          refreshControl={
+            <RefreshControl
+              refreshing={isFetching && !isLoading}
+              onRefresh={() => {
+                refetch()
+                inventory.refetch()
+              }}
+              tintColor={colors.accentGreen}
+              colors={[colors.accentGreen]}
+            />
+          }
+          initialNumToRender={15}
+          maxToRenderPerBatch={20}
+          windowSize={7}
+        />
+      )}
+
+      <View style={styles.fabWrap} pointerEvents="box-none">
+        <Pressable
+          onPress={() => {
+            feedbackOk()
+            setContinuousCount(0)
+            setScannerOpen(true)
+          }}
+          accessibilityLabel="Escanear QR Code"
+          style={styles.fab}
+        >
+          <Icon name="qr_code_scanner" size={28} color={colors.bgBase} />
+        </Pressable>
+      </View>
+
+      <Toast toast={toast} />
+
+      {pendingScanGroup ? (
+        <InstanceSelectorModal
+          candidates={pendingScanGroup}
+          subtitle={`Pedido ${pendingScanGroup[0]?.orderNumber || ''} · selecione para entregar`}
+          onPick={(p) => { setPendingScanGroup(null); setModalParticipant(p) }}
+          onClose={() => setPendingScanGroup(null)}
+        />
+      ) : null}
+
+      {modalParticipant ? (
+        <ConfirmationModal
+          participant={modalParticipant}
+          fieldsTitle="Kit a entregar"
+          fieldsLayout="rows"
+          fieldsLimit={10}
+          confirmLabel="Entregar kit"
+          confirmIcon={<Icon name="redeem" size={18} color={colors.textPrimary} />}
+          onClose={() => setModalParticipant(null)}
+          onConfirm={() => handleWithdraw(modalParticipant)}
+          submitting={withdrawMutation.isPending}
+        />
+      ) : null}
+
+      {alreadyScanned ? (
+        <ConfirmationModal
+          participant={alreadyScanned}
+          fieldsTitle="Kit deste ingresso"
+          fieldsLayout="rows"
+          fieldsLimit={10}
+          confirmLabel=""
+          alreadyScanned
+          alreadyScannedMessage="Kit já retirado"
+          alreadyScannedDetail={formatWithdrawnAt(alreadyScanned.kitWithdrawnAt)}
+          onClose={() => setAlreadyScanned(null)}
+          onConfirm={() => setAlreadyScanned(null)}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={!!revertTarget}
+        title="Reverter retirada?"
+        description={revertTarget
+          ? `${revertTarget.name}\nO kit voltará ao estoque e esta retirada será desfeita.`
+          : ''}
+        confirmLabel="Reverter"
+        tone="danger"
+        onConfirm={() => revertTarget && executeRevertKit(revertTarget)}
+        onCancel={() => setRevertTarget(null)}
+      />
+    </View>
+  )
+}
+
+function StatCell({
+  value,
+  label,
+  valueColor,
+}: {
+  value: number | string
+  label: string
+  valueColor?: string
+}) {
+  return (
+    <View style={styles.statCell}>
+      <Text style={[styles.statValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  )
+}
+
+const KitRow = memo(function KitRow({
+  participant: p,
+  delivered: isDone,
+  isPending,
+  isReverting,
+  onWithdraw,
+  onRevert,
+  group,
+}: {
+  participant: MobileParticipant
+  delivered: boolean
+  isPending?: boolean
+  isReverting?: boolean
+  onWithdraw: () => void
+  onRevert: () => void
+  group?: GroupInfo
+}) {
+  return (
+    <View style={[styles.row, isPending && { opacity: 0.7 }]}>
+      {group ? (
+        <View
+          style={[
+            styles.groupStripe,
+            {
+              backgroundColor: group.color,
+              top: group.first ? 6 : 0,
+              bottom: group.last ? 6 : 0,
+            },
+          ]}
+        />
+      ) : null}
+
+      <View style={styles.rowTop}>
+        <View style={{ position: 'relative' }}>
+          <View style={styles.rowAvatar}>
+            <Text style={styles.rowAvatarLabel}>{p.initials}</Text>
+          </View>
+          {isDone ? (
+            <View style={styles.checkedBadge}>
+              <Icon name="check" size={11} color={colors.textPrimary} />
+            </View>
+          ) : null}
+        </View>
+
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <View style={styles.rowNameLine}>
+            <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
+            {p.instanceIndex !== undefined && p.instanceTotal !== undefined ? (
+              <View style={styles.instanceBadge}>
+                <Text style={styles.instanceBadgeLabel}>
+                  #{p.instanceIndex}/{p.instanceTotal}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Text style={styles.rowMetaText} numberOfLines={1}>
+            {group ? `${group.pos}/${group.total} · ` : ''}{p.orderNumber} · {p.category}
+          </Text>
+        </View>
+
+        {isDone ? (
+          <Pressable
+            onPress={onRevert}
+            disabled={isReverting}
+            style={[styles.doneBlock, isReverting && { opacity: 0.5 }]}
+          >
+            {isReverting ? (
+              <ActivityIndicator size="small" color={colors.accentGreen} />
+            ) : (
+              <Icon name="check_circle" size={16} color={colors.accentGreen} />
+            )}
+            <Text style={styles.doneLabel}>Entregue</Text>
+          </Pressable>
+        ) : isPending ? (
+          <View style={styles.pendingBlock}>
+            <ActivityIndicator size="small" color={colors.accentGreen} />
+          </View>
+        ) : (
+          <Pressable onPress={onWithdraw} style={styles.confirmBlock}>
+            <Icon name="redeem" size={16} color={colors.textPrimary} />
+            <Text style={styles.confirmLabel}>Entregar</Text>
+          </Pressable>
+        )}
+      </View>
+    </View>
+  )
+})
+
+function formatWithdrawnAt(iso: string | null | undefined): string | undefined {
+  if (!iso) return 'Kit já retirado para este ingresso.'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 'Kit já retirado para este ingresso.'
+  const date = d
+    .toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })
+    .replace('.', '')
+  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  return `Kit retirado em ${date} às ${time}`
+}
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: colors.bgBase,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingTop: 4,
+  },
+  swapButton: {
+    width: 36,
+    height: 36,
+    borderRadius: radius.md,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  eventName: {
+    fontSize: 15,
+    fontWeight: font.weight.extrabold,
+    color: colors.textPrimary,
+  },
+  eventCaption: {
+    fontSize: 10,
+    fontWeight: font.weight.semibold,
+    color: colors.textTertiary,
+  },
+  liveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radius.sm,
+    backgroundColor: colors.bgElevated,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+  },
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  liveLabel: {
+    fontSize: 10,
+    fontWeight: font.weight.bold,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  stats: {
+    flexDirection: 'row',
+    marginHorizontal: 20,
+    marginTop: 8,
+    borderRadius: radius.lg,
+    backgroundColor: colors.bgBase,
+    borderWidth: 1,
+    borderColor: colors.borderMuted,
+    overflow: 'hidden',
+  },
+  statCell: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  statValue: {
+    fontSize: 18,
+    fontWeight: font.weight.extrabold,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  statLabel: {
+    fontSize: 9,
+    fontWeight: font.weight.semibold,
+    color: colors.textTertiary,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  statDivider: {
+    width: 1,
+    marginVertical: 10,
+    backgroundColor: colors.borderMuted,
+  },
+  inventoryPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radius.lg,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+  },
+  inventoryPillLabel: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.textPrimary,
+  },
+  inventoryPanel: {
+    marginTop: 6,
+    padding: 10,
+    borderRadius: radius.lg,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    gap: 4,
+  },
+  inventoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+  },
+  inventoryRowOk: {
+    backgroundColor: colors.bgBase,
+    borderColor: colors.borderMuted,
+  },
+  inventoryRowLow: {
+    backgroundColor: colors.accentOrangeBg,
+    borderColor: colors.accentOrangeBorder,
+  },
+  inventoryRowOut: {
+    backgroundColor: colors.accentRedBg,
+    borderColor: colors.accentRedBorder,
+  },
+  inventoryName: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: colors.textPrimary,
+  },
+  inventoryStock: {
+    fontSize: 11,
+    fontWeight: font.weight.bold,
+    color: colors.textSecondary,
+  },
+  searchRow: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+  },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    height: 40,
+    borderRadius: radius.lg,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    paddingHorizontal: 14,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: font.weight.medium,
+    color: colors.textPrimary,
+    paddingVertical: 0,
+  },
+  filtersRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    alignItems: 'center',
+  },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+  },
+  filterChipActive: {
+    backgroundColor: colors.textPrimary,
+    borderColor: colors.textPrimary,
+  },
+  filterLabel: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.textSecondary,
+  },
+  filterLabelActive: {
+    color: colors.bgBase,
+  },
+  filterCountBox: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+    backgroundColor: colors.bgOverlay,
+  },
+  filterCountBoxActive: {
+    backgroundColor: colors.borderDefault,
+  },
+  filterCountLabel: {
+    fontSize: 10,
+    fontWeight: font.weight.bold,
+    color: colors.textSecondary,
+  },
+  filterCountLabelActive: {
+    color: colors.textPrimary,
+  },
+  refreshButton: {
+    marginLeft: 'auto',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: radius.pill,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+  },
+  list: {
+    flex: 1,
+    marginTop: 8,
+    marginHorizontal: 20,
+  },
+  listContent: {
+    paddingBottom: 90,
+    borderRadius: radius.lg,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    overflow: 'hidden',
+  },
+  row: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderMuted,
+    position: 'relative',
+  },
+  groupStripe: {
+    position: 'absolute',
+    left: 0,
+    width: 3,
+    borderRadius: 2,
+  },
+  rowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  rowAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.md,
+    backgroundColor: colors.bgElevated,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rowAvatarLabel: {
+    fontSize: 13,
+    fontWeight: font.weight.extrabold,
+    color: colors.textPrimary,
+  },
+  checkedBadge: {
+    position: 'absolute',
+    bottom: -3,
+    right: -3,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.accentGreenDim,
+    borderWidth: 2,
+    borderColor: colors.bgBase,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rowNameLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 1,
+  },
+  rowName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: font.weight.bold,
+    color: colors.textPrimary,
+  },
+  instanceBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.sm,
+    backgroundColor: '#1E2A3E',
+    borderWidth: 1,
+    borderColor: '#2A3E5A',
+  },
+  instanceBadgeLabel: {
+    fontSize: 9,
+    fontWeight: font.weight.extrabold,
+    color: '#79B8FF',
+  },
+  rowMetaText: {
+    fontSize: 11,
+    fontWeight: font.weight.medium,
+    color: colors.textTertiary,
+  },
+  doneBlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  doneLabel: {
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: colors.accentGreen,
+  },
+  pendingBlock: {
+    height: 30,
+    paddingHorizontal: 14,
+    borderRadius: radius.md,
+    backgroundColor: '#1A2E1A',
+    borderWidth: 1,
+    borderColor: '#2A4A2A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmBlock: {
+    height: 30,
+    paddingHorizontal: 14,
+    borderRadius: radius.md,
+    backgroundColor: colors.accentOrangeBg,
+    borderWidth: 1,
+    borderColor: colors.accentOrange,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  confirmLabel: {
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: colors.textPrimary,
+  },
+  errorCard: {
+    margin: 20,
+    padding: 40,
+    borderRadius: radius.lg,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    alignItems: 'center',
+    gap: 10,
+  },
+  errorTitle: {
+    fontSize: 13,
+    fontWeight: font.weight.semibold,
+    color: colors.textPrimary,
+  },
+  retryButton: {
+    marginTop: 6,
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: radius.md,
+    backgroundColor: colors.accentGreenDim,
+    borderWidth: 1,
+    borderColor: colors.accentGreen,
+  },
+  retryLabel: {
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: colors.textPrimary,
+  },
+  emptyCard: {
+    padding: 40,
+    alignItems: 'center',
+    gap: 10,
+  },
+  emptyLabel: {
+    fontSize: 13,
+    fontWeight: font.weight.semibold,
+    color: colors.textTertiary,
+  },
+  fabWrap: {
+    position: 'absolute',
+    bottom: 16,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 60,
+  },
+  fab: {
+    width: 56,
+    height: 56,
+    borderRadius: radius.lg,
+    backgroundColor: colors.textPrimary,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 10,
+  },
+})

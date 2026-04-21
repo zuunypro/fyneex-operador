@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Fluxo completo · fyx-go</title>
+  <style>
+    :root { color-scheme: dark }
+    body { margin: 0; padding: 20px; max-width: 560px; margin-inline: auto;
+      font: 14px/1.4 -apple-system, system-ui, sans-serif;
+      background: #111; color: #e8e8e8; }
+    h1 { font-size: 18px; margin: 0 0 4px }
+    .muted { color: #8a8a8a; font-size: 12px }
+    .row { display: flex; gap: 10px; margin-top: 10px }
+    input { flex: 1; padding: 10px 12px; border-radius: 10px;
+      background: #1a1a1a; border: 1px solid #333; color: #e8e8e8; font: inherit; }
+    button { appearance: none; width: 100%; padding: 12px 14px; margin-top: 10px;
+      border-radius: 10px; border: 1px solid #3fb950; background: #238636;
+      color: #fff; font-weight: 700; font-size: 14px; cursor: pointer; }
+    button.danger { background:#5c1a1a; border-color:#8a2626 }
+    pre { background: #1a1a1a; border: 1px solid #333; border-radius: 10px;
+      padding: 12px; overflow: auto; font-size: 12px; white-space: pre-wrap;
+      word-break: break-word; margin-top: 10px; }
+    ol { padding-left: 20px }
+    code { background: #1a1a1a; padding: 2px 6px; border-radius: 4px }
+  </style>
+</head>
+<body>
+  <h1>Fluxo completo do app mobile</h1>
+  <p class="muted">
+    Origin: <code id="origin"></code><br>
+    Step 1: POST /api/mobile/login<br>
+    Step 2: localStorage['fyneex_mobile_user'] = user<br>
+    Step 3: GET /api/mobile/events com <code>Authorization: Bearer &lt;accessHash&gt;</code>
+  </p>
+
+  <div class="row">
+    <input id="email" type="email" placeholder="e-mail" autocapitalize="none" autocomplete="username" value="weslle@subfyneex.com" />
+    <input id="pass"  type="password" placeholder="senha" autocomplete="current-password" />
+  </div>
+  <button id="go">Rodar fluxo completo</button>
+  <button id="clear" class="danger">Limpar storage</button>
+
+  <pre id="out">Aguardando…</pre>
+
+  <script>
+    const STORAGE_KEY = 'fyneex_mobile_user'
+    const out = document.getElementById('out')
+    document.getElementById('origin').textContent = location.origin
+
+    function log(label, obj) {
+      const time = new Date().toLocaleTimeString()
+      const body = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2)
+      out.textContent += '\n\n[' + time + '] ' + label + '\n' + body
+      out.scrollTop = out.scrollHeight
+    }
+    function clean() { out.textContent = '' }
+
+    async function loginStep(email, password) {
+      log('→ STEP 1: POST /api/mobile/login', { email })
+      const res = await fetch('/api/mobile/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+      const text = await res.text()
+      log('← ' + res.status, text.slice(0, 400))
+      if (!res.ok) throw new Error('login ' + res.status)
+      const data = JSON.parse(text)
+      if (!data.success || !data.user) throw new Error('login payload inválido')
+      return data.user
+    }
+
+    function storeStep(user) {
+      log('→ STEP 2: localStorage.setItem', { key: STORAGE_KEY, value: user })
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(user))
+      const back = localStorage.getItem(STORAGE_KEY)
+      log('← localStorage lido de volta', back ? JSON.parse(back) : null)
+    }
+
+    async function eventsStep(user) {
+      log('→ STEP 3: GET /api/mobile/events (Bearer)', { accessHash: user.accessHash?.slice(0, 16) + '…' })
+      const res = await fetch('/api/mobile/events', {
+        method: 'GET',
+        headers: { 'Authorization': 'Bearer ' + user.accessHash },
+      })
+      const text = await res.text()
+      log('← ' + res.status, text.slice(0, 600))
+      if (!res.ok) throw new Error('events ' + res.status)
+      const data = JSON.parse(text)
+      log('✓ Total de eventos: ' + (data.events?.length ?? 0), '')
+    }
+
+    document.getElementById('go').onclick = async () => {
+      clean()
+      try {
+        const email = document.getElementById('email').value
+        const pass = document.getElementById('pass').value
+        const user = await loginStep(email, pass)
+        storeStep(user)
+        await eventsStep(user)
+        log('✅ FLUXO OK', 'App principal deveria funcionar com estes mesmos passos.')
+      } catch (err) {
+        log('⚠ FLUXO QUEBROU', {
+          name: err?.name, message: err?.message,
+          stack: (err?.stack || '').split('\n').slice(0, 4).join('\n'),
+        })
+      }
+    }
+    document.getElementById('clear').onclick = () => {
+      localStorage.removeItem(STORAGE_KEY)
+      clean()
+      log('Storage limpo.', '')
+    }
+  </script>
+</body>
+</html>
