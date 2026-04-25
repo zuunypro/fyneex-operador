@@ -13,7 +13,7 @@ const BACKEND_CODE_LABELS: Record<string, string> = {
   INSTANCE_OUT_OF_RANGE: 'Número do ingresso inválido pra este pedido',
   CHECKIN_REQUIRED: 'Faça o check-in antes de entregar o kit',
   KIT_NO_STOCK_CONFIGURED: 'Sem estoque vinculado — toque no participante manualmente pra forçar',
-  TIMEOUT: 'Timeout (rede lenta) — tente de novo',
+  TIMEOUT: 'Conexão lenta — tente de novo',
   NETWORK_ERROR: 'Sem conexão com o servidor',
 }
 

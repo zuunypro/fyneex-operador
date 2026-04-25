@@ -8,6 +8,13 @@ interface RevertCheckinPayload {
   participantId: string
   eventId: string
   instanceIndex?: number
+  /**
+   * Justificativa opcional do operador pra auditoria (ex: "ingresso duplicado",
+   * "checkin acidental"). Servidor aceita campos extras no body e ignora os
+   * desconhecidos — quando back agent atualizar, vai ler de `reason` no
+   * metadata. Não bloqueia: operador pode reverter sem motivo.
+   */
+  reason?: string
 }
 
 interface RevertCheckinResponse {
@@ -28,7 +35,7 @@ interface ParticipantsCache {
 }
 
 type RevertContext = {
-  snapshots: Array<{ key: unknown[]; data: ParticipantsCache }>
+  snapshots: { key: unknown[]; data: ParticipantsCache }[]
 }
 
 function matchesRow(row: MobileParticipant, v: RevertCheckinPayload): boolean {
@@ -47,6 +54,11 @@ export function useRevertCheckin() {
         eventId: data.eventId,
       }
       if (data.instanceIndex !== undefined) payload.instanceIndex = data.instanceIndex
+      // Servidor ignora campos desconhecidos hoje, mas chega no audit log via
+      // body raw. Quando back agent ler, vai jogar em metadata.reason.
+      if (data.reason && data.reason.trim()) {
+        payload.reason = data.reason.trim().slice(0, 500)
+      }
 
       const isOnline = useOfflineStore.getState().online !== false
       if (!isOnline) {

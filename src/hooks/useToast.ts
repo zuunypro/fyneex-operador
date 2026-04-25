@@ -3,7 +3,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 export interface Toast {
   id: number
   message: string
-  type: 'success' | 'error'
+  // 'info' = ação ja processada (ex: 409 "kit já retirado") — não é falha,
+  // mas também não é "eu fiz agora". Cor neutra azul/amarelo no Toast.tsx.
+  type: 'success' | 'error' | 'info'
 }
 
 /**
@@ -25,7 +27,7 @@ export function useToast(durationMs = 3000) {
   }, [])
 
   const show = useCallback(
-    (message: string, type: 'success' | 'error') => {
+    (message: string, type: 'success' | 'error' | 'info') => {
       if (timerRef.current) clearTimeout(timerRef.current)
       seqRef.current += 1
       const id = seqRef.current

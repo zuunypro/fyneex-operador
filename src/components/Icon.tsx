@@ -41,6 +41,7 @@ const MAP: Record<string, IconEntry> = {
   help: { family: 'material', name: 'help' },
   how_to_reg: { family: 'material', name: 'how-to-reg' },
   image: { family: 'material', name: 'image' },
+  info: { family: 'material', name: 'info' },
   inventory_2: { family: 'material', name: 'inventory-2' },
   keyboard: { family: 'material', name: 'keyboard' },
   location_on: { family: 'material', name: 'location-on' },

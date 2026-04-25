@@ -3,9 +3,27 @@ import { StyleSheet, Text, View } from 'react-native'
 import { colors, font, radius } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useOfflineStore } from '@/stores/offlineStore'
+import {
+  DEFAULT_STALE_PACKET_HOURS,
+  SAME_DAY_STALE_PACKET_HOURS,
+} from '@/services/offline'
 import { Icon } from './Icon'
 
-const STALE_HOURS = 12
+interface StalePacketWarningProps {
+  /** Override do threshold (em horas). Default: DEFAULT_STALE_PACKET_HOURS. */
+  staleHours?: number
+}
+
+/** Heurística "evento é hoje" baseada na data string do EventInfo (YYYY-MM-DD
+ * ou outro formato livre — comparamos com Date.toDateString do hoje pra
+ * tolerar variações). Em eventos do dia, o snapshot envelhece mais rápido
+ * (vendas last-minute) — reduzimos o threshold. */
+function isEventToday(dateStr: string | undefined): boolean {
+  if (!dateStr) return false
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return false
+  return d.toDateString() === new Date().toDateString()
+}
 
 function formatAge(downloadedAtIso: string): string {
   const ms = Date.now() - new Date(downloadedAtIso).getTime()
@@ -32,7 +50,7 @@ function formatAge(downloadedAtIso: string): string {
  * de N horas atrás — clientes que pagaram nesse meio-tempo NÃO aparecem na
  * lista offline. Sem o aviso, ele não sabe que o packet tá velho.
  */
-export function StalePacketWarning() {
+export function StalePacketWarning({ staleHours }: StalePacketWarningProps = {}) {
   const event = useNavigationStore((s) => s.selectedEvent)
   const packets = useOfflineStore((s) => s.packets)
   const online = useOfflineStore((s) => s.online)
@@ -46,8 +64,14 @@ export function StalePacketWarning() {
   // Sem packet → não há nada local pra estar antigo.
   if (online !== false || !meta) return null
 
+  // Eventos do dia: janela menor (4h vs 12h) — vendas last-minute envelhecem
+  // o snapshot rapidíssimo. Override por prop tem prioridade pra casos
+  // específicos (ex: evento de múltiplos dias com checkin contínuo).
+  const effectiveHours =
+    staleHours ?? (isEventToday(event?.date) ? SAME_DAY_STALE_PACKET_HOURS : DEFAULT_STALE_PACKET_HOURS)
+
   const ageMs = Date.now() - new Date(meta.downloadedAt).getTime()
-  if (!Number.isFinite(ageMs) || ageMs < STALE_HOURS * 3_600_000) return null
+  if (!Number.isFinite(ageMs) || ageMs < effectiveHours * 3_600_000) return null
 
   return (
     <View style={styles.box}>

@@ -22,9 +22,9 @@ interface WithdrawalResponse {
   checkedInAt?: string
   implicitCheckIn?: boolean
   kit?: {
-    items: Array<{ label: string; variant: string | null }>
+    items: { label: string; variant: string | null }[]
     affected: number
-    errors?: Array<{ label: string; itemId: string | null; message: string }>
+    errors?: { label: string; itemId: string | null; message: string }[]
   }
   warning?: string
   participant?: { name: string; ticketName: string }
@@ -39,7 +39,7 @@ interface ParticipantsCache {
 }
 
 type WithdrawalContext = {
-  snapshots: Array<{ key: unknown[]; data: ParticipantsCache }>
+  snapshots: { key: unknown[]; data: ParticipantsCache }[]
 }
 
 function matchesRow(row: MobileParticipant, v: WithdrawalPayload): boolean {

@@ -15,6 +15,9 @@ import type { MobileParticipant } from '@/hooks/useParticipants'
 import type { InventoryItem, InventoryStats } from '@/hooks/useInventory'
 import {
   clearQueue,
+  countParticipantsInPacket,
+  getPendingActionsForEvent as offlineGetPendingActionsForEvent,
+  listQueueBackups,
   loadIndex,
   loadQueue,
   migrateLegacyAsyncStorage,
@@ -22,6 +25,7 @@ import {
   removeFromQueueByEvent,
   removePacket,
   savePacket,
+  saveQueueBackup,
   updateQueueItem,
   wipePackets,
   type PacketMeta,
@@ -66,6 +70,14 @@ interface OfflineState {
   deleteEvent: (eventId: string) => Promise<void>
   /** Apaga tudo — packets + fila + reseta estado. Usado no logout. */
   wipeAll: () => Promise<void>
+  /** Quantas ações pending/syncing/failed existem pra um evento (UI gate). */
+  getPendingActionsForEvent: (eventId: string) => Promise<number>
+  /**
+   * Verifica se existem backups recentes da fila (gerados em logout/wipe
+   * acidental). NÃO restaura automaticamente — só sinaliza pra UI exibir
+   * recovery opcional. Restauração efetiva fica numa segunda iteração.
+   */
+  recoverBackup: () => Promise<{ found: number }>
 }
 
 const MAX_AUTO_ATTEMPTS = 3
@@ -368,6 +380,17 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
         inventory: { items: inventoryItems, stats: inventoryStats },
       })
 
+      // Checksum: confere se a contagem real no SQLite bate com o esperado.
+      // Se não bate, savePacket pode ter aplicado redação/merge inconsistente
+      // ou a transação parcial. Não atualiza estado pra success — operador
+      // re-baixa em vez de operar com snapshot suspeito.
+      const persistedCount = await countParticipantsInPacket(eventId)
+      if (persistedCount !== participants.length) {
+        throw new Error(
+          `Download incompleto — tente novamente (esperado ${participants.length}, gravado ${persistedCount})`,
+        )
+      }
+
       await get().refreshState()
       const meta = get().packets.find((p) => p.eventId === eventId)
       if (!meta) throw new Error('Packet salvo mas não indexado — reabra o app')
@@ -396,8 +419,25 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     // Sinaliza pro syncNow em andamento que deve abortar (ele verifica no loop).
     syncRunning = false
     stopAutoRetryTimer()
+    // Backup defensivo: se há ações não-sincronizadas, persiste antes de
+    // limpar pra que logout acidental não destrua escaneamentos do operador.
+    // Recovery fica conceitualmente disponível (recoverBackup()).
+    const queue = get().queue
+    const unsynced = queue.filter((q) => q.status !== 'synced')
+    if (unsynced.length > 0) {
+      await saveQueueBackup(unsynced)
+    }
     await Promise.all([wipePackets(), clearQueue()])
     set({ packets: [], queue: [], lastSync: null, syncing: false })
+  },
+
+  getPendingActionsForEvent: async (eventId) => {
+    return offlineGetPendingActionsForEvent(eventId)
+  },
+
+  recoverBackup: async () => {
+    const backups = await listQueueBackups()
+    return { found: backups.reduce((acc, b) => acc + b.count, 0) }
   },
 
   syncNow: async () => {
@@ -408,6 +448,11 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     set({ syncing: true })
     let synced = 0
     let failed = 0
+    // Coletamos os eventIds de ações que sincronizaram com sucesso (incluindo
+    // 409/404/410 que removemos do queue). Invalidação no finally vira por
+    // evento — antes era genérica `['mobile', 'participants']` e disparava
+    // refetch global desnecessário em todos os eventos baixados.
+    const syncedEventIds = new Set<string>()
 
     // try/finally garante que `syncing: false` SEMPRE volta pra false, mesmo
     // se AsyncStorage ou algo inesperado lançar fora do try interno. Antes,
@@ -458,6 +503,7 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
               clearTimeout(timeoutId)
               await removeFromQueue(action.id)
               synced++
+              syncedEventIds.add(action.eventId)
             } catch (err) {
               clearTimeout(timeoutId)
               const apiErr = err instanceof ApiError ? err : null
@@ -486,6 +532,7 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
               if (apiErr?.status === 409) {
                 await removeFromQueue(action.id).catch(() => {})
                 synced++
+                syncedEventIds.add(action.eventId)
                 return
               }
 
@@ -506,6 +553,7 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
               if (apiErr && (apiErr.status === 404 || apiErr.status === 410)) {
                 await removeFromQueue(action.id).catch(() => {})
                 synced++
+                syncedEventIds.add(action.eventId)
                 return
               }
 
@@ -551,13 +599,17 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
         queue: next,
         lastSync: { at: new Date().toISOString(), synced, failed },
       })
-      // Se algo foi efetivamente sincronizado, invalida as queries afetadas
-      // pra que a lista de participantes/estoque atualize automaticamente —
-      // antes disso o operador precisava puxar pra baixo manualmente.
+      // Se algo foi efetivamente sincronizado, invalida queries por evento.
+      // Antes era genérico `['mobile', 'participants']` e disparava refetch
+      // global em TODOS os eventos baixados — em prod com 5+ eventos cada
+      // sync gerava ~10 fetches paralelos. Stats fica genérica de propósito
+      // (resumo geral é leve).
       if (synced > 0 && syncQueryClient) {
         try {
-          syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'participants'] })
-          syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'inventory'] })
+          for (const evId of syncedEventIds) {
+            syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'participants', evId] })
+            syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'inventory', evId] })
+          }
           syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'stats'] })
         } catch { /* invalidate é best-effort, não falha sync por causa disso */ }
       }

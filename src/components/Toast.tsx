@@ -10,20 +10,35 @@ import type { Toast as ToastData } from '@/hooks/useToast'
 export function Toast({ toast }: { toast: ToastData | null }) {
   if (!toast) return null
 
-  const success = toast.type === 'success'
-  const bg = success ? '#0D2818' : '#2A0A0A'
-  const border = success ? colors.accentGreenDim : '#4A1A1A'
-  const textColor = success ? colors.accentGreen : colors.accentRed
+  // 'info' = neutro (ação já processada). Azul/amarelo discreto pra não
+  // confundir com "✓ feito agora" (verde) nem com erro (vermelho).
+  const variant = toast.type
+  const bg =
+    variant === 'success' ? '#0D2818'
+    : variant === 'info' ? '#1B2433'
+    : '#2A0A0A'
+  const border =
+    variant === 'success' ? colors.accentGreenDim
+    : variant === 'info' ? '#2A3E5A'
+    : '#4A1A1A'
+  const textColor =
+    variant === 'success' ? colors.accentGreen
+    : variant === 'info' ? '#79B8FF'
+    : colors.accentRed
+  const iconName =
+    variant === 'success' ? 'check_circle'
+    : variant === 'info' ? 'info'
+    : 'error'
 
   return (
     <View
       pointerEvents="none"
-      accessibilityLiveRegion={success ? 'polite' : 'assertive'}
+      accessibilityLiveRegion={variant === 'error' ? 'assertive' : 'polite'}
       style={styles.root}
     >
       <View style={[styles.card, { backgroundColor: bg, borderColor: border }]}>
         <Icon
-          name={success ? 'check_circle' : 'error'}
+          name={iconName}
           size={20}
           color={textColor}
         />

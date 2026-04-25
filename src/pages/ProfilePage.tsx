@@ -14,9 +14,11 @@ import { colors, font, radius } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useOfflineStore } from '@/stores/offlineStore'
 import { useUserStore } from '@/stores/userStore'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Icon } from '@/components/Icon'
 import { StorageWarningModal } from '@/components/StorageWarningModal'
 import { apiGet } from '@/services/api'
+import { closeDb } from '@/services/db'
 import { checkStorageForDownload, type StorageStatus } from '@/services/storage'
 
 const APP_VERSION = (Constants.expoConfig?.version as string | undefined) || '1.0.0'
@@ -50,6 +52,7 @@ export function ProfilePage() {
   const retryAction = useOfflineStore((s) => s.retryAction)
   const dropAction = useOfflineStore((s) => s.dropAction)
   const wipeAll = useOfflineStore((s) => s.wipeAll)
+  const getPendingActionsForEvent = useOfflineStore((s) => s.getPendingActionsForEvent)
   const syncing = useOfflineStore((s) => s.syncing)
 
   const [checking, setChecking] = useState(false)
@@ -60,6 +63,9 @@ export function ProfilePage() {
     status: StorageStatus | null
     loading: boolean
   } | null>(null)
+  // Diálogo bloqueia delete quando há ações offline não-sincronizadas pra
+  // aquele evento (apagar = perder os scans). null = dialog fechado.
+  const [deleteWithPending, setDeleteWithPending] = useState<{ count: number } | null>(null)
 
   const initials = user?.name
     ? user.name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() || '').join('')
@@ -161,6 +167,15 @@ export function ProfilePage() {
 
   async function handleDelete() {
     if (!event) return
+    // Gate extra: se há ações pendentes pro evento, mostra ConfirmDialog
+    // dedicado (mais visível que o Alert nativo) listando a contagem real.
+    // Sem isso o operador podia apagar sem perceber que havia 50 scans
+    // ainda no buffer offline.
+    const pendingForEvent = await getPendingActionsForEvent(event.id).catch(() => 0)
+    if (pendingForEvent > 0) {
+      setDeleteWithPending({ count: pendingForEvent })
+      return
+    }
     Alert.alert(
       'Apagar dados offline?',
       'Os scans pendentes sem sync serão perdidos.',
@@ -213,6 +228,9 @@ export function ProfilePage() {
             onPress: async () => {
               try {
                 await wipeAll()
+                // closeDb solta o handle SQLite (libera lock WAL). Próximo
+                // getDb reabre on demand no relogin sem state stale.
+                await closeDb().catch(() => {})
                 await doLogout()
               } catch {
                 // Falha ao limpar local: libera o flag pra operador tentar de
@@ -227,6 +245,7 @@ export function ProfilePage() {
     } else {
       try {
         await wipeAll()
+        await closeDb().catch(() => {})
         await doLogout()
       } catch {
         setIsLoggingOut(false)
@@ -479,6 +498,26 @@ export function ProfilePage() {
         onClose={() => setStorageWarning(null)}
       />
     ) : null}
+    <ConfirmDialog
+      open={!!deleteWithPending}
+      title="Há ações offline pendentes"
+      description={
+        deleteWithPending
+          ? `${deleteWithPending.count} ação${deleteWithPending.count === 1 ? '' : 'ões'} offline não sincronizada${deleteWithPending.count === 1 ? '' : 's'} para este evento. Apagar mesmo assim descarta esses scans.`
+          : ''
+      }
+      confirmLabel="Apagar mesmo assim"
+      cancelLabel="Cancelar"
+      tone="danger"
+      onConfirm={async () => {
+        const evId = event?.id
+        setDeleteWithPending(null)
+        if (evId) {
+          try { await deleteEvent(evId) } catch { /* best-effort */ }
+        }
+      }}
+      onCancel={() => setDeleteWithPending(null)}
+    />
     </>
   )
 }

@@ -73,6 +73,18 @@ const SCHEMA_MIGRATIONS: { version: number; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_actions_status ON pending_actions(status);
     `,
   },
+  {
+    // v2: download_complete pra detectar packets parcialmente gravados (rede
+    // caiu durante savePacket / app crash). DEFAULT 1 não invalida packets
+    // antigos — só novos downloads passam pelo gate. Índice composto explícito
+    // pra acelerar UPSERT no caminho delta (savePacketDelta).
+    version: 2,
+    sql: `
+      ALTER TABLE event_packets ADD COLUMN download_complete INTEGER NOT NULL DEFAULT 1;
+      CREATE INDEX IF NOT EXISTS idx_participants_pid_instance
+        ON participants(event_id, participant_id, instance_index);
+    `,
+  },
 ]
 
 async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {

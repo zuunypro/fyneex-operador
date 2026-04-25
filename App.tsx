@@ -12,6 +12,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { AppShell } from '@/components/AppShell'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ApiError } from '@/services/api'
+import { closeDb } from '@/services/db'
 import { colors } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { setSyncQueryClient, useOfflineStore } from '@/stores/offlineStore'
@@ -90,6 +91,7 @@ function AppRouter() {
   // sair. O listener global cobre todos os hooks (`useCheckin`, `useKitWithdrawal`,
   // `useParticipants`, etc.) e dispara o mesmo `logout()` do navigationStore.
   const offlineQueue = useOfflineStore((s) => s.queue)
+  const wipeAll = useOfflineStore((s) => s.wipeAll)
   useEffect(() => {
     if (!isLoggedIn) return
     const handleAuthError = (err: unknown) => {
@@ -100,6 +102,10 @@ function AppRouter() {
         // pendentes que serão perdidas. Perda silenciosa era um problema grave
         // em eventos com baixa conectividade (operador escaneava offline,
         // sessão expirava, logout apagava a fila sem nenhum aviso).
+        // wipeAll faz backup das ações não-sincronizadas em AsyncStorage antes
+        // de limpar (recoverBackup pode trazer de volta). closeDb fecha o
+        // handle pra liberar lock do WAL — getDb reabre on demand no próximo
+        // login, sem prender state stale entre sessões.
         const pendingCount = offlineQueue.filter(
           (q) => q.status === 'pending' || q.status === 'syncing' || q.status === 'failed',
         ).length
@@ -110,7 +116,11 @@ function AppRouter() {
             [{ text: 'OK' }],
           )
         }
-        logout().catch(() => { /* logout sempre best-effort */ })
+        ;(async () => {
+          try { await wipeAll() } catch { /* best-effort */ }
+          try { await closeDb() } catch { /* best-effort */ }
+          await logout().catch(() => { /* logout sempre best-effort */ })
+        })()
         return
       }
 
@@ -134,7 +144,7 @@ function AppRouter() {
     return () => { queryUnsub(); mutUnsub() }
   // offlineQueue is intentionally in deps: handler must read latest queue length
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoggedIn, queryClient, logout, offlineQueue])
+  }, [isLoggedIn, queryClient, logout, offlineQueue, wipeAll])
 
   // Invalida queries quando o app volta pra online. Sem isso, a lista de
   // participants/inventory continua mostrando os dados cacheados do offline

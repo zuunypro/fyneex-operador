@@ -1,4 +1,5 @@
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useEffect, useState } from 'react'
+import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { colors, font, radius } from '@/theme'
 import { Icon } from './Icon'
 
@@ -9,7 +10,14 @@ interface ConfirmDialogProps {
   confirmLabel?: string
   cancelLabel?: string
   tone?: 'danger' | 'neutral'
-  onConfirm: () => void
+  /**
+   * Quando definido, exibe um input de texto opcional acima dos botões. O
+   * texto é passado pra `onConfirm`. Usado pra capturar motivo de revert
+   * (audit log) sem bloquear o operador (campo opcional).
+   */
+  inputLabel?: string
+  inputPlaceholder?: string
+  onConfirm: (input?: string) => void
   onCancel: () => void
 }
 
@@ -25,10 +33,19 @@ export function ConfirmDialog({
   confirmLabel = 'Confirmar',
   cancelLabel = 'Cancelar',
   tone = 'neutral',
+  inputLabel,
+  inputPlaceholder,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const danger = tone === 'danger'
+  const [input, setInput] = useState('')
+
+  // Limpa o input ao reabrir — sem isso, motivo da revert anterior persiste
+  // na próxima vez que operador abre o dialog (estado não desmonta).
+  useEffect(() => {
+    if (open) setInput('')
+  }, [open])
 
   return (
     <Modal
@@ -53,12 +70,29 @@ export function ConfirmDialog({
 
           {description ? <Text style={styles.description}>{description}</Text> : null}
 
+          {inputLabel ? (
+            <View style={styles.inputBlock}>
+              <Text style={styles.inputLabel}>{inputLabel}</Text>
+              <TextInput
+                value={input}
+                onChangeText={setInput}
+                placeholder={inputPlaceholder}
+                placeholderTextColor={colors.textTertiary}
+                style={styles.input}
+                multiline
+                maxLength={500}
+                autoCapitalize="sentences"
+                autoCorrect
+              />
+            </View>
+          ) : null}
+
           <View style={styles.actions}>
             <Pressable onPress={onCancel} style={[styles.button, styles.cancelButton]}>
               <Text style={styles.cancelLabel}>{cancelLabel}</Text>
             </Pressable>
             <Pressable
-              onPress={onConfirm}
+              onPress={() => onConfirm(inputLabel ? input.trim() || undefined : undefined)}
               style={[styles.button, danger ? styles.confirmDanger : styles.confirmNeutral]}
             >
               <Text style={danger ? styles.confirmDangerLabel : styles.confirmNeutralLabel}>
@@ -125,6 +159,30 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 4,
     marginBottom: 14,
+  },
+  inputBlock: {
+    marginBottom: 12,
+  },
+  inputLabel: {
+    fontSize: 11,
+    fontWeight: font.weight.bold,
+    color: colors.textSecondary,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  input: {
+    minHeight: 64,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: colors.bgBase,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    fontSize: 13,
+    fontWeight: font.weight.medium,
+    color: colors.textPrimary,
+    textAlignVertical: 'top',
   },
   actions: {
     flexDirection: 'row',

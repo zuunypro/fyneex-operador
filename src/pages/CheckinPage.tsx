@@ -121,8 +121,10 @@ export function CheckinPage() {
       })
       showToast('Check-in realizado!', 'success')
     } catch (err) {
+      // 409 = ação já processada (não falhou, não acabei de fazer agora).
+      // Toast neutro 'info' azul pra não confundir com sucesso fresco.
       if (err instanceof ApiError && err.status === 409) {
-        showToast('Participante já confirmado', 'success')
+        showToast('Participante já confirmado', 'info')
       } else {
         showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
       }
@@ -134,19 +136,20 @@ export function CheckinPage() {
     setObsText('')
   }
 
-  async function executeRevertCheckin(p: MobileParticipant) {
+  async function executeRevertCheckin(p: MobileParticipant, reason?: string) {
     setRevertTarget(null)
     try {
       await revertMutation.mutateAsync({
         participantId: p.participantId,
         eventId: event.id,
         instanceIndex: p.instanceIndex,
+        reason,
       })
       recentObs.remove(p.id)
       showToast('Check-in revertido', 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast('Este check-in já havia sido revertido', 'success')
+        showToast('Este check-in já havia sido revertido', 'info')
       } else {
         showToast(friendlyError(err, 'Erro ao reverter check-in'), 'error')
       }
@@ -183,7 +186,9 @@ export function CheckinPage() {
       showToast('Check-in realizado!', 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast('Participante já confirmado', 'success')
+        showToast('Participante já confirmado', 'info')
+      } else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+        showToast(err.message, 'error')
       } else {
         showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
       }
@@ -202,7 +207,10 @@ export function CheckinPage() {
         showToast('Check-in realizado', 'success')
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
-          showToast('Já confirmado', 'success')
+          showToast('Já confirmado', 'info')
+        } else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+          feedbackBad()
+          showToast(err.message, 'error')
         } else {
           feedbackBad()
           showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
@@ -215,7 +223,7 @@ export function CheckinPage() {
       .sort((a, b) => (a.instanceIndex ?? 0) - (b.instanceIndex ?? 0))
     if (stillPending.length === 0) {
       const target = matches.find((p) => p.status === 'checked') || matches[0]
-      showToast(`${target.name} já confirmado`, 'success')
+      showToast(`${target.name} já confirmado`, 'info')
       return
     }
     if (stillPending.length > 1) {
@@ -234,7 +242,10 @@ export function CheckinPage() {
       showToast(`${target.name} ✓`, 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast(`${target.name} já confirmado`, 'success')
+        showToast(`${target.name} já confirmado`, 'info')
+      } else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+        feedbackBad()
+        showToast(err.message, 'error')
       } else {
         feedbackBad()
         showToast(friendlyError(err, 'Erro ao realizar check-in'), 'error')
@@ -473,7 +484,9 @@ export function CheckinPage() {
           : ''}
         confirmLabel="Reverter"
         tone="danger"
-        onConfirm={() => revertTarget && executeRevertCheckin(revertTarget)}
+        inputLabel="Motivo (opcional, vai pra auditoria)"
+        inputPlaceholder="Ex: confundi com outro participante, scan acidental..."
+        onConfirm={(reason) => revertTarget && executeRevertCheckin(revertTarget, reason)}
         onCancel={() => setRevertTarget(null)}
       />
     </View>

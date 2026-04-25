@@ -133,29 +133,39 @@ export function StockPage() {
   // Map de busca rápida pra o expand do KitRow exibir estoque ao lado
   // de cada item do kit. Key normalizada pra "ticket - label" lowercase
   // — bate com o formato usado em inventory_items.category.
+  // Soma o total + acumula breakdown por variante (P/M/G) pra UI mostrar
+  // por que "1 em estoque" pode falhar quando a variante específica zerou.
   const stockByCategory = useMemo(() => {
     const map = new Map<
       string,
-      { currentStock: number; reservedStock: number; status: string }
+      {
+        currentStock: number
+        reservedStock: number
+        status: string
+        variants: { variant: string; currentStock: number; status: string }[]
+      }
     >()
     const items = inventory.data?.items || []
     for (const item of items) {
       if (typeof item.category !== 'string') continue
       const key = item.category.trim().toLowerCase()
       if (!key) continue
-      // Se houver múltiplos items com mesma category (variantes), soma
-      // current_stock — operador vê o total disponível pra essa linha.
+      const variantEntry = item.variant
+        ? { variant: item.variant, currentStock: item.currentStock, status: item.status }
+        : null
       const prev = map.get(key)
       if (prev) {
         prev.currentStock += item.currentStock
         prev.reservedStock += item.reservedStock
         if (item.status === 'out' || prev.status === 'out') prev.status = 'out'
         else if (item.status === 'low' || prev.status === 'low') prev.status = 'low'
+        if (variantEntry) prev.variants.push(variantEntry)
       } else {
         map.set(key, {
           currentStock: item.currentStock,
           reservedStock: item.reservedStock,
           status: item.status,
+          variants: variantEntry ? [variantEntry] : [],
         })
       }
     }
@@ -189,7 +199,11 @@ export function StockPage() {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast('Kit já havia sido retirado', 'success')
+        // Kit já entregue antes (outro operador / outro device). Tom neutro
+        // 'info' azul — não é erro nem sucesso fresco.
+        showToast('Kit já havia sido retirado', 'info')
+      } else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+        showToast(err.message, 'error')
       } else if (isForceableNoStockError(err)) {
         setForcePrompt({ participant: p, serverMessage: err.message })
       } else {
@@ -218,7 +232,7 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setForcePrompt(null)
-        showToast('Kit já havia sido retirado', 'success')
+        showToast('Kit já havia sido retirado', 'info')
       } else {
         // Mantém o modal aberto pra operador ajustar motivo / cancelar
         showToast(friendlyError(err, 'Erro ao forçar retirada'), 'error')
@@ -226,17 +240,19 @@ export function StockPage() {
     }
   }
 
-  async function executeRevertKit(p: MobileParticipant) {
+  async function executeRevertKit(p: MobileParticipant, reason?: string) {
     setRevertTarget(null)
     try {
       await revertMutation.mutateAsync({
         participantId: p.participantId,
         eventId: event.id,
+        instanceIndex: p.instanceIndex,
+        reason,
       })
       showToast('Retirada revertida', 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast('Nenhuma retirada para reverter', 'success')
+        showToast('Nenhuma retirada para reverter', 'info')
       } else {
         showToast(friendlyError(err, 'Erro ao reverter retirada'), 'error')
       }
@@ -280,7 +296,11 @@ export function StockPage() {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast('Kit já havia sido retirado', 'success')
+        // Kit já entregue antes (outro operador / outro device). Tom neutro
+        // 'info' azul — não é erro nem sucesso fresco.
+        showToast('Kit já havia sido retirado', 'info')
+      } else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+        showToast(err.message, 'error')
       } else if (isForceableNoStockError(err)) {
         // QR não tinha matches locais (participantes desconhecido pro app), mas o
         // servidor encontrou e recusou por falta de estoque. Não temos um
@@ -309,8 +329,10 @@ export function StockPage() {
         if (firstErr) { feedbackBad(); showToast(`Parcial: ${firstErr.message}`, 'error') }
         else showToast('Kit entregue', 'success')
       } catch (err) {
-        if (err instanceof ApiError && err.status === 409) showToast('Kit já retirado', 'success')
-        else { feedbackBad(); showToast(friendlyError(err, 'Erro ao entregar kit'), 'error') }
+        if (err instanceof ApiError && err.status === 409) showToast('Kit já retirado', 'info')
+        else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+          feedbackBad(); showToast(err.message, 'error')
+        } else { feedbackBad(); showToast(friendlyError(err, 'Erro ao entregar kit'), 'error') }
       }
       return
     }
@@ -319,7 +341,7 @@ export function StockPage() {
       .sort((a, b) => (a.instanceIndex ?? 0) - (b.instanceIndex ?? 0))
     if (stillPending.length === 0) {
       const target = matches.find((p) => isDelivered(p)) || matches[0]
-      showToast(`${target.name} já retirou`, 'success')
+      showToast(`${target.name} já retirou`, 'info')
       return
     }
     if (stillPending.length > 1) {
@@ -340,7 +362,9 @@ export function StockPage() {
       else showToast(`${target.name} ✓`, 'success')
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        showToast(`${target.name} já retirou`, 'success')
+        showToast(`${target.name} já retirou`, 'info')
+      } else if (err instanceof Error && err.message.includes('Fila offline cheia')) {
+        feedbackBad(); showToast(err.message, 'error')
       } else { feedbackBad(); showToast(friendlyError(err, 'Erro ao entregar kit'), 'error') }
     }
   }, [participants, withdrawMutation, event.id, isDelivered, showToast])
@@ -625,7 +649,9 @@ export function StockPage() {
           : ''}
         confirmLabel="Reverter"
         tone="danger"
-        onConfirm={() => revertTarget && executeRevertKit(revertTarget)}
+        inputLabel="Motivo (opcional, vai pra auditoria)"
+        inputPlaceholder="Ex: kit errado, tamanho trocado, devolução..."
+        onConfirm={(reason) => revertTarget && executeRevertKit(revertTarget, reason)}
         onCancel={() => setRevertTarget(null)}
       />
 
@@ -801,49 +827,76 @@ const KitRow = memo(function KitRow({
                 Kit a entregar
               </Text>
               <View style={{ gap: 8 }}>
-                {kitItems.map((k, i) => (
-                  <View key={`${k.label}-${i}`} style={styles.kitLineCard}>
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={styles.kitLineLabel} numberOfLines={1}>
-                        {k.label}
-                      </Text>
-                      {k.value ? (
-                        <Text style={styles.kitLineValue} numberOfLines={1}>
-                          {k.value}
-                        </Text>
-                      ) : (
-                        <View style={styles.kitVariantTag}>
-                          <Text style={styles.kitVariantTagLabel}>Único</Text>
+                {kitItems.map((k, i) => {
+                  // Breakdown de variantes (P: 0, M: 3, G: 2) — só mostra se
+                  // a categoria tem 2+ variantes cadastradas. Operador entende
+                  // por que "1 em estoque" pode falhar (variante PEDIDA zerou).
+                  const variants = k.stock?.variants || []
+                  const showVariants = variants.length > 1
+                  return (
+                    <View key={`${k.label}-${i}`}>
+                      <View style={styles.kitLineCard}>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.kitLineLabel} numberOfLines={1}>
+                            {k.label}
+                          </Text>
+                          {k.value ? (
+                            <Text style={styles.kitLineValue} numberOfLines={1}>
+                              {k.value}
+                            </Text>
+                          ) : (
+                            <View style={styles.kitVariantTag}>
+                              <Text style={styles.kitVariantTagLabel}>Único</Text>
+                            </View>
+                          )}
                         </View>
-                      )}
+                        {k.stock ? (
+                          <View
+                            style={[
+                              styles.stockBadge,
+                              k.stock.status === 'out' && styles.stockBadgeOut,
+                              k.stock.status === 'low' && styles.stockBadgeLow,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.stockBadgeValue,
+                                k.stock.status === 'out' && { color: colors.accentRed },
+                                k.stock.status === 'low' && { color: colors.accentOrange },
+                              ]}
+                            >
+                              {k.stock.currentStock}
+                            </Text>
+                            <Text style={styles.stockBadgeLabel}>em estoque</Text>
+                          </View>
+                        ) : (
+                          <View style={styles.stockBadge}>
+                            <Text style={[styles.stockBadgeValue, { color: colors.textTertiary }]}>—</Text>
+                            <Text style={styles.stockBadgeLabel}>sem item</Text>
+                          </View>
+                        )}
+                      </View>
+                      {showVariants ? (
+                        <View style={styles.variantBreakdown}>
+                          {variants.map((v) => (
+                            <View
+                              key={v.variant}
+                              style={[
+                                styles.variantPill,
+                                v.status === 'out' && styles.variantPillOut,
+                                v.status === 'low' && styles.variantPillLow,
+                              ]}
+                            >
+                              <Text style={styles.variantPillLabel}>
+                                {v.variant}: {v.currentStock}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : null}
                     </View>
-                    {k.stock ? (
-                      <View
-                        style={[
-                          styles.stockBadge,
-                          k.stock.status === 'out' && styles.stockBadgeOut,
-                          k.stock.status === 'low' && styles.stockBadgeLow,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.stockBadgeValue,
-                            k.stock.status === 'out' && { color: colors.accentRed },
-                            k.stock.status === 'low' && { color: colors.accentOrange },
-                          ]}
-                        >
-                          {k.stock.currentStock}
-                        </Text>
-                        <Text style={styles.stockBadgeLabel}>em estoque</Text>
-                      </View>
-                    ) : (
-                      <View style={styles.stockBadge}>
-                        <Text style={[styles.stockBadgeValue, { color: colors.textTertiary }]}>—</Text>
-                        <Text style={styles.stockBadgeLabel}>sem item</Text>
-                      </View>
-                    )}
-                  </View>
-                ))}
+                  )
+                })}
               </View>
             </View>
           ) : (
@@ -1374,6 +1427,35 @@ const styles = StyleSheet.create({
     color: colors.accentGreen,
     letterSpacing: 0.6,
     textTransform: 'uppercase',
+  },
+  variantBreakdown: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 4,
+  },
+  variantPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.sm,
+    backgroundColor: colors.bgBase,
+    borderWidth: 1,
+    borderColor: colors.borderMuted,
+  },
+  variantPillLow: {
+    borderColor: '#4B3012',
+    backgroundColor: '#1F1A0F',
+  },
+  variantPillOut: {
+    borderColor: '#4A1F1F',
+    backgroundColor: '#2A1414',
+  },
+  variantPillLabel: {
+    fontSize: 10,
+    fontWeight: font.weight.bold,
+    color: colors.textSecondary,
+    letterSpacing: 0.3,
   },
   stockBadge: {
     minWidth: 64,

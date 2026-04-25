@@ -8,6 +8,12 @@ interface RevertKitPayload {
   participantId: string
   eventId: string
   instanceIndex?: number
+  /**
+   * Justificativa opcional do operador (ex: "kit errado", "tamanho trocado").
+   * Servidor aceita campos extras hoje e ignora os desconhecidos — quando o
+   * back agent atualizar, vai ler de `reason` no metadata. Opcional.
+   */
+  reason?: string
 }
 
 interface RevertKitResponse {
@@ -27,7 +33,7 @@ interface ParticipantsCache {
 }
 
 type RevertContext = {
-  snapshots: Array<{ key: unknown[]; data: ParticipantsCache }>
+  snapshots: { key: unknown[]; data: ParticipantsCache }[]
 }
 
 export function useRevertKit() {
@@ -49,10 +55,14 @@ export function useRevertKit() {
         await useOfflineStore.getState().refreshState()
         return { success: true, queued: true }
       }
+      const reason = data.reason && data.reason.trim()
+        ? data.reason.trim().slice(0, 500)
+        : undefined
       return apiPost<RevertKitResponse>('/api/mobile/kit/revert', {
         participantId: data.participantId,
         eventId: data.eventId,
         instanceIndex: data.instanceIndex,
+        ...(reason ? { reason } : {}),
       })
     },
 

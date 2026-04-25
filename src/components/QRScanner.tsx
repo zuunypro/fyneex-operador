@@ -1,6 +1,9 @@
 import { CameraView, useCameraPermissions } from 'expo-camera'
+import * as Haptics from 'expo-haptics'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  AppState,
+  type AppStateStatus,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,6 +16,21 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors, font, radius } from '@/theme'
 import { feedbackBad, feedbackOk, primeAudio } from '@/utils/feedback'
 import { Icon } from './Icon'
+
+/**
+ * Mutex in-memory por TOKEN cru (raw QR string). Defesa em profundidade contra
+ * double-scan: usuário toca "Digitar código" + câmera detecta o mesmo QR no
+ * mesmo tick → o segundo callback vira no-op ANTES de virar request HTTP. O
+ * servidor já tem CAS atômico no checkin, mas isso evita request desnecessária
+ * + toast confuso de "já confirmado" milissegundos depois do primeiro sucesso.
+ *
+ * Top-level (escopo de módulo) pra persistir entre renders/montagens — o
+ * scanner desmonta/remonta quando operador troca de aba e a janela de defesa
+ * (~1.5s) precisa cobrir esse re-entry. Set é por processo, então fechar o
+ * app limpa tudo (ok: novo processo = nova sessão de scan).
+ */
+const inflightTokens = new Set<string>()
+const INFLIGHT_TTL_MS = 1500
 
 export interface ScannedToken {
   /** order_item id extracted from the QR (the "oi" field of a fyx token, or raw id). */
@@ -27,7 +45,7 @@ interface QRScannerProps {
   expectedEventId: string
   title: string
   subtitle?: string
-  onScan: (token: ScannedToken) => void
+  onScan: (token: ScannedToken) => void | Promise<void>
   onClose: () => void
   continuous?: boolean
   onContinuousChange?: (next: boolean) => void
@@ -62,7 +80,12 @@ export function parseFyneexQrToken(raw: string): ScannedToken | null {
       const payload = JSON.parse(json) as { oi?: string; eid?: string }
       if (!payload.oi || !payload.eid) return null
       return { participantId: payload.oi, eventId: payload.eid, raw: trimmed }
-    } catch {
+    } catch (err) {
+      // Log truncado pra debug em prod via remote logger (Sentry/similar
+      // captura console.warn). Truncamos a 50 chars pra não vazar payload
+      // grande adversarial. Não muda UX — operador vê só o flash 'bad'.
+      const sample = trimmed.slice(0, 50)
+      console.warn('[QRScanner] Falha ao decodificar QR fyx:', sample, err)
       return null
     }
   }
@@ -71,6 +94,8 @@ export function parseFyneexQrToken(raw: string): ScannedToken | null {
     return { participantId: trimmed, raw: trimmed }
   }
 
+  // QR não bate com nenhum formato conhecido — ajuda debug remoto.
+  console.warn('[QRScanner] QR em formato desconhecido:', trimmed.slice(0, 50))
   return null
 }
 
@@ -94,6 +119,10 @@ export function QRScanner({
   const [errorMsg, setErrorMsg] = useState('')
   const [manualInput, setManualInput] = useState('')
   const [showManual, setShowManual] = useState(false)
+  // Conta toques no botão "Digitar código" sem leitura bem-sucedida em 30s
+  // — ao chegar a 3, exibe banner forte sugerindo input manual (câmera
+  // possivelmente quebrada / QR ruim / mau enquadramento).
+  const [manualHintForced, setManualHintForced] = useState(false)
 
   const scannedRef = useRef(false)
   const lastRawRef = useRef<{ raw: string; at: number } | null>(null)
@@ -101,6 +130,10 @@ export function QRScanner({
   const flashRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const errorClearRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Tracking de toques no manual trigger pra disparar banner forte quando
+  // operador toca repetidamente sem conseguir scan (câmera com problema).
+  const manualTouchesRef = useRef<number[]>([])
+  const lastSuccessAtRef = useRef<number>(0)
 
   // No-op em RN mas mantém a assinatura da versão web.
   useEffect(() => { primeAudio() }, [])
@@ -112,6 +145,19 @@ export function QRScanner({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [permission?.granted])
+
+  // Re-checa permissão quando o app volta de background. Operador pode ter
+  // ido em Settings revogar a câmera e voltado — sem isso o componente fica
+  // inerte mostrando câmera vazia. AppState dispara 'active' nesse retorno.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state === 'active' && permission && !permission.granted && permission.canAskAgain) {
+        requestPermission().catch(() => { /* fail-soft, UI já mostra denied */ })
+      }
+    })
+    return () => sub.remove()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permission?.granted, permission?.canAskAgain])
 
   useEffect(() => () => {
     if (cooldownRef.current) clearTimeout(cooldownRef.current)
@@ -150,13 +196,43 @@ export function QRScanner({
       return
     }
 
+    // Mutex por TOKEN cru (defesa em profundidade vs double-scan no mesmo
+    // tick: input manual + câmera detectando o mesmo QR). Mesmo com CAS no
+    // servidor, sem isso teríamos 2 requests + toast confuso. TTL 1.5s é
+    // mais que suficiente pra qualquer round-trip de mutation.
+    if (inflightTokens.has(raw)) return
+    inflightTokens.add(raw)
+
     scannedRef.current = true
     lastRawRef.current = { raw, at: Date.now() }
     setFlash('ok')
-    feedbackOk()
+    // Haptic LEVE pre-fetch: confirma "li o QR". O forte (success) sai depois
+    // que onScan resolver, em runScan abaixo.
+    Haptics.selectionAsync().catch(() => {})
+
+    const runScan = async () => {
+      try {
+        await onScan(parsed)
+        // Sucesso: marca timestamp pra não disparar banner manual fortemente.
+        lastSuccessAtRef.current = Date.now()
+        // Reset contador de toques no manual trigger — operador conseguiu scan,
+        // não tem problema de câmera.
+        manualTouchesRef.current = []
+        if (manualHintForced) setManualHintForced(false)
+        // Haptic FORTE pós-sucesso: confirma "validado".
+        feedbackOk()
+      } catch {
+        // Caller cuida do toast humanizado; aqui só haptic forte de erro.
+        feedbackBad()
+      } finally {
+        // Libera o token após o TTL (não imediato — protege contra rebote
+        // da câmera que pode reler o mesmo QR enquanto operador ainda olha).
+        setTimeout(() => inflightTokens.delete(raw), INFLIGHT_TTL_MS)
+      }
+    }
 
     if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current)
-    scanTimeoutRef.current = setTimeout(() => onScan(parsed), 180)
+    scanTimeoutRef.current = setTimeout(() => { void runScan() }, 180)
 
     if (continuous) {
       if (cooldownRef.current) clearTimeout(cooldownRef.current)
@@ -165,7 +241,7 @@ export function QRScanner({
         setFlash(null)
       }, CONTINUOUS_COOLDOWN_MS)
     }
-  }, [expectedEventId, onScan, continuous])
+  }, [expectedEventId, onScan, continuous, manualHintForced])
 
   const submitManual = useCallback(() => {
     if (!manualInput.trim()) return
@@ -173,8 +249,34 @@ export function QRScanner({
     setManualInput('')
   }, [manualInput, handleDetected])
 
+  // Track toques no botão "Digitar código". 3 toques em 30s sem scan bem
+  // sucedido entre eles = banner forte (câmera com problema / QR ruim /
+  // iluminação ruim). Operador pode achar que o app não vê o QR — banner
+  // direto sugere alternativa óbvia. No 3o toque, abrimos manual + banner
+  // continua visível ali em cima até o próximo sucesso resetar.
+  const handleManualTriggerPress = useCallback(() => {
+    const now = Date.now()
+    const fresh = manualTouchesRef.current.filter(
+      (t) => now - t < 30_000 && t > lastSuccessAtRef.current,
+    )
+    fresh.push(now)
+    manualTouchesRef.current = fresh
+    if (fresh.length >= 3 && !manualHintForced) setManualHintForced(true)
+    setShowManual(true)
+  }, [manualHintForced])
+
+  // Permite fechar manualmente pra que o banner reapareça (caso operador
+  // entenda que precisa tentar a câmera de novo). Pressed na X do header
+  // já fecha o scanner inteiro — esta X é só pra colapsar o input.
+  const closeManualForm = useCallback(() => setShowManual(false), [])
+
   const denied = permission?.granted === false
   const loading = !permission
+  // Banner forte do fallback manual: permissão negada (input é a única opção)
+  // OU operador tocou 3+ vezes no manual sem conseguir scan em 30s (câmera
+  // possivelmente quebrada). Aparece sempre que essas condições são true,
+  // mesmo com a form aberta — input já fica visível abaixo dela.
+  const showManualBanner = denied || manualHintForced
 
   const flashColor = flash === 'ok' ? colors.accentGreen : flash === 'bad' ? colors.accentRed : '#FFFFFF40'
 
@@ -264,13 +366,34 @@ export function QRScanner({
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.manualWrap}
       >
-        <SafeAreaView edges={['bottom']}>
-          {!showManual ? (
-            <Pressable onPress={() => setShowManual(true)} style={styles.manualTrigger}>
+        <SafeAreaView edges={['bottom']} style={{ alignItems: 'center', gap: 10 }}>
+          {showManualBanner ? (
+            // Banner forte: câmera fora ou operador tentou 3x sem sucesso.
+            // Aparece centralizado e bem visível pra puxar atenção. O input
+            // (showManual) pode coexistir abaixo.
+            <View style={styles.manualBanner}>
+              <Icon name="warning" size={18} color={colors.accentOrange} />
+              <Text style={styles.manualBannerText} numberOfLines={2}>
+                Câmera com problema? Digite o código manualmente.
+              </Text>
+              {!showManual ? (
+                <Pressable
+                  onPress={handleManualTriggerPress}
+                  style={styles.manualBannerButton}
+                >
+                  <Icon name="keyboard" size={16} color={colors.textPrimary} />
+                  <Text style={styles.manualTriggerLabel}>Digitar código</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+          {!showManual && !showManualBanner ? (
+            <Pressable onPress={handleManualTriggerPress} style={styles.manualTrigger}>
               <Icon name="keyboard" size={16} color={colors.textPrimary} />
               <Text style={styles.manualTriggerLabel}>Digitar código</Text>
             </Pressable>
-          ) : (
+          ) : null}
+          {showManual ? (
             <View style={styles.manualForm}>
               <TextInput
                 autoFocus
@@ -287,8 +410,11 @@ export function QRScanner({
               <Pressable onPress={submitManual} style={styles.manualSubmit}>
                 <Text style={styles.manualSubmitLabel}>OK</Text>
               </Pressable>
+              <Pressable onPress={closeManualForm} style={styles.manualClose} hitSlop={8}>
+                <Icon name="close" size={16} color={colors.textTertiary} />
+              </Pressable>
             </View>
-          )}
+          ) : null}
         </SafeAreaView>
       </KeyboardAvoidingView>
 
@@ -461,6 +587,40 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.borderDefault,
   },
+  // Banner proeminente quando câmera tá fora ou operador tentou 3x. Centralizado,
+  // bg destacado com tom warning, botão grande pra alternativa óbvia.
+  manualBanner: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: radius.lg,
+    backgroundColor: 'rgba(31,26,15,0.95)',
+    borderWidth: 1,
+    borderColor: '#6B4A1A',
+    maxWidth: 380,
+    width: '100%',
+  },
+  manualBannerText: {
+    fontSize: 13,
+    fontWeight: font.weight.bold,
+    color: '#E8C77A',
+    textAlign: 'center',
+  },
+  manualBannerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    minWidth: 200,
+    justifyContent: 'center',
+  },
   manualTriggerLabel: {
     fontSize: 12,
     fontWeight: font.weight.bold,
@@ -491,6 +651,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accentGreenDim,
     borderWidth: 1,
     borderColor: colors.accentGreen,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  manualClose: {
+    width: 36,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },

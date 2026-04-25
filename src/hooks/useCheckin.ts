@@ -35,7 +35,7 @@ interface ParticipantsCache {
 }
 
 type CheckinContext = {
-  snapshots: Array<{ key: unknown[]; data: ParticipantsCache }>
+  snapshots: { key: unknown[]; data: ParticipantsCache }[]
 }
 
 function matchesRow(row: MobileParticipant, v: CheckinPayload): boolean {

@@ -31,6 +31,21 @@ const LEGACY_KEY_PACKET = (eventId: string) => `fyneex_offline_packet_v1_${event
 const LEGACY_KEY_INDEX = 'fyneex_offline_index_v1'
 const LEGACY_KEY_QUEUE = 'fyneex_offline_queue_v1'
 const LEGACY_MIGRATION_DONE = 'fyneex_offline_migrated_to_sqlite_v1'
+const LEGACY_MIGRATION_ATTEMPTS = 'fyneex_offline_migrated_attempts'
+const LEGACY_MIGRATION_MAX_ATTEMPTS = 3
+
+/** Janela conceitual pra purga de backups da queue salvos no logout (7 dias). */
+export const QUEUE_BACKUP_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const QUEUE_BACKUP_PREFIX = 'fyneex_offline_queue_backup_'
+
+/**
+ * Stale threshold default pro packet local (em horas). Configurável via prop
+ * em <StalePacketWarning>; centralizado aqui pra reuso futuro (ex: cron de
+ * lembrete pra re-baixar).
+ */
+export const DEFAULT_STALE_PACKET_HOURS = 12
+/** Threshold reduzido pra eventos do dia — janela de mudança é mais curta. */
+export const SAME_DAY_STALE_PACKET_HOURS = 4
 
 export interface EventPacket {
   eventId: string
@@ -121,6 +136,10 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
  * pelo mesmo normalizeForSearch antes da query (feito em useParticipants
  * online via `applyFilters` server-side e em `loadParticipantsPaginated`
  * offline via search param que será normalizado no caller).
+ *
+ * IMPORTANTE: roda em cima do MobileParticipant ORIGINAL (pré-redação) pra
+ * preservar busca por buyerCpfLast5 mesmo após redactForOffline limpar o
+ * campo do data_json — o índice mantém os 5 dígitos pra LIKE, o JSON não.
  */
 function buildSearchText(p: MobileParticipant): string {
   const parts = [
@@ -134,6 +153,39 @@ function buildSearchText(p: MobileParticipant): string {
   return normalizeForSearch(parts.join(' '))
 }
 
+/**
+ * Regex de campos sensíveis em instanceFields (formulário pós-compra) que
+ * não precisam ficar em SQLite plain-text. Operador no portão só usa nome +
+ * ticketName + status — CPF/email/telefone são PII e ficam só no servidor.
+ * Match case-insensitive contra o `label` do field (que é o que o organizador
+ * configurou no painel).
+ */
+const SENSITIVE_FIELD_KEY_RE = /(cpf|email|phone|telefone|rg|cnpj)/i
+
+/**
+ * LGPD: redação defensiva antes de gravar em SQLite. SQLCipher exigiria Expo
+ * prebuild (saímos do Expo Go), então optamos por NÃO persistir o que não é
+ * necessário pra UX offline. Search continua funcionando porque o search_text
+ * (índice) é construído a partir do MobileParticipant ORIGINAL ANTES da
+ * redação — buyerCpfLast5 vira buscável sem ser persistido em data_json.
+ *
+ * Mantemos: name, ticketName, category, status, kitWithdrawnAt, instanceLabel,
+ * orderNumber e flags de UI. Removemos: buyerEmail, buyerPhone, buyerCpfLast5
+ * e instanceFields cujo label match com SENSITIVE_FIELD_KEY_RE.
+ */
+export function redactForOffline(p: MobileParticipant): MobileParticipant {
+  const filteredInstance = p.instanceFields?.filter(
+    (f) => !SENSITIVE_FIELD_KEY_RE.test(f.label || ''),
+  )
+  return {
+    ...p,
+    buyerEmail: undefined,
+    buyerPhone: undefined,
+    buyerCpfLast5: undefined,
+    instanceFields: filteredInstance,
+  }
+}
+
 /* ── Packets (snapshots) ────────────────────────────────────────────────── */
 
 interface PacketRow {
@@ -143,6 +195,7 @@ interface PacketRow {
   stats_json: string | null
   participant_count: number
   item_count: number
+  download_complete?: number
 }
 
 interface ParticipantRow {
@@ -154,10 +207,13 @@ export async function savePacket(packet: EventPacket): Promise<void> {
     // Replace garante que re-download substitui o packet inteiro de forma
     // atômica. ON DELETE CASCADE limpa rows da tabela participants.
     await db.runAsync('DELETE FROM event_packets WHERE event_id = ?', packet.eventId)
+    // download_complete=0 enquanto o INSERT bulk roda — só vira 1 no fim.
+    // Se o app crashar/processo morrer no meio, loadPacket retorna null e o
+    // operador é forçado a re-baixar (em vez de operar com snapshot parcial).
     await db.runAsync(
       `INSERT INTO event_packets
-        (event_id, downloaded_at, inventory_json, stats_json, participant_count, item_count)
-        VALUES (?, ?, ?, ?, ?, ?)`,
+        (event_id, downloaded_at, inventory_json, stats_json, participant_count, item_count, download_complete)
+        VALUES (?, ?, ?, ?, ?, ?, 0)`,
       packet.eventId,
       packet.downloadedAt,
       JSON.stringify(packet.inventory.items),
@@ -168,6 +224,10 @@ export async function savePacket(packet: EventPacket): Promise<void> {
     // Bulk insert de participants. SQLite roda muito rápido em transação.
     // Em testes locais: 30k inserts em ~1.5s no Android midrange.
     for (const p of packet.participants) {
+      // Search text é montado ANTES da redação pra preservar busca por
+      // buyerCpfLast5 mesmo sem persistir o campo em data_json (LGPD).
+      const searchText = buildSearchText(p)
+      const redacted = redactForOffline(p)
       await db.runAsync(
         `INSERT INTO participants
           (event_id, participant_id, instance_index, search_text, status, kit_withdrawn, order_number, data_json)
@@ -175,11 +235,119 @@ export async function savePacket(packet: EventPacket): Promise<void> {
         packet.eventId,
         p.participantId,
         p.instanceIndex ?? null,
-        buildSearchText(p),
+        searchText,
         p.status,
         p.kitWithdrawnAt ? 1 : 0,
         p.orderNumber ?? '',
-        JSON.stringify(p),
+        JSON.stringify(redacted),
+      )
+    }
+    // Marca completo só ao final — atomicamente, dentro da mesma transação.
+    await db.runAsync(
+      'UPDATE event_packets SET download_complete = 1 WHERE event_id = ?',
+      packet.eventId,
+    )
+  })
+}
+
+/**
+ * UPSERT delta: aplica adições/atualizações + remoções pontuais sem destruir
+ * o packet inteiro. Pensado pra refresh incremental (escala melhor que o
+ * full replace do savePacket em eventos de 30k). Mantém atomicidade via
+ * transação: se algo falhar no meio, ROLLBACK preserva o estado anterior.
+ *
+ * TODO: depende de backend expor `?since=<iso>` em
+ * `/api/mobile/events/:id/participants` retornando só o delta. Por enquanto
+ * `downloadEvent` ainda usa savePacket (full). Helper já fica pronto pra
+ * quando o endpoint evoluir.
+ */
+export async function savePacketDelta(
+  eventId: string,
+  addedOrUpdated: MobileParticipant[],
+  removedIds: { participantId: string; instanceIndex?: number }[],
+  inventory?: { items: InventoryItem[]; stats?: InventoryStats },
+): Promise<void> {
+  await withTransaction(async (db) => {
+    // Pré-condição: precisa existir um packet base. Sem isso, delta não faz
+    // sentido — caller deve fazer full download primeiro.
+    const meta = await db.getFirstAsync<{ event_id: string }>(
+      'SELECT event_id FROM event_packets WHERE event_id = ?',
+      eventId,
+    )
+    if (!meta) {
+      throw new Error('savePacketDelta sem packet base — chame savePacket primeiro')
+    }
+
+    // INSERT OR REPLACE precisa de UNIQUE constraint na chave lógica. Como o
+    // schema atual usa AUTOINCREMENT pk e índice composto (não UNIQUE), fazemos
+    // DELETE+INSERT por chave lógica antes — equivalente em comportamento.
+    for (const p of addedOrUpdated) {
+      const searchText = buildSearchText(p)
+      const redacted = redactForOffline(p)
+      await db.runAsync(
+        `DELETE FROM participants
+          WHERE event_id = ? AND participant_id = ?
+            AND ((instance_index IS NULL AND ? IS NULL) OR instance_index = ?)`,
+        eventId,
+        p.participantId,
+        p.instanceIndex ?? null,
+        p.instanceIndex ?? null,
+      )
+      await db.runAsync(
+        `INSERT INTO participants
+          (event_id, participant_id, instance_index, search_text, status, kit_withdrawn, order_number, data_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        eventId,
+        p.participantId,
+        p.instanceIndex ?? null,
+        searchText,
+        p.status,
+        p.kitWithdrawnAt ? 1 : 0,
+        p.orderNumber ?? '',
+        JSON.stringify(redacted),
+      )
+    }
+
+    for (const r of removedIds) {
+      await db.runAsync(
+        `DELETE FROM participants
+          WHERE event_id = ? AND participant_id = ?
+            AND ((instance_index IS NULL AND ? IS NULL) OR instance_index = ?)`,
+        eventId,
+        r.participantId,
+        r.instanceIndex ?? null,
+        r.instanceIndex ?? null,
+      )
+    }
+
+    // Recalcula participant_count direto do COUNT pra não desviar do real.
+    const countRow = await db.getFirstAsync<{ c: number }>(
+      'SELECT COUNT(*) as c FROM participants WHERE event_id = ?',
+      eventId,
+    )
+    const newCount = countRow?.c ?? 0
+
+    if (inventory) {
+      await db.runAsync(
+        `UPDATE event_packets SET
+          downloaded_at = ?, inventory_json = ?, stats_json = ?,
+          participant_count = ?, item_count = ?, download_complete = 1
+          WHERE event_id = ?`,
+        new Date().toISOString(),
+        JSON.stringify(inventory.items),
+        inventory.stats ? JSON.stringify(inventory.stats) : null,
+        newCount,
+        inventory.items.length,
+        eventId,
+      )
+    } else {
+      await db.runAsync(
+        `UPDATE event_packets SET
+          downloaded_at = ?, participant_count = ?, download_complete = 1
+          WHERE event_id = ?`,
+        new Date().toISOString(),
+        newCount,
+        eventId,
       )
     }
   })
@@ -192,6 +360,9 @@ export async function loadPacket(eventId: string): Promise<EventPacket | null> {
     eventId,
   )
   if (!meta) return null
+  // Packet incompleto (download interrompido / app crash no meio do
+  // savePacket) → trata como ausente pra forçar re-download.
+  if (meta.download_complete === 0) return null
 
   const rows = await db.getAllAsync<ParticipantRow>(
     'SELECT data_json FROM participants WHERE event_id = ? ORDER BY pk',
@@ -288,11 +459,25 @@ export async function loadQueue(): Promise<PendingAction[]> {
   return rows.map(rowToAction)
 }
 
+/**
+ * Hard cap pra fila offline. Acima disso dropamos novos inserts em vez de
+ * encher disco silenciosamente. 5000 cobre qualquer evento real (típico
+ * < 3000 entries/dia inteiro de balcão); ultrapassar = bug ou esquecimento
+ * extremo. Mensagem clara força operador a sincronizar antes de continuar.
+ */
+const QUEUE_HARD_CAP = 5000
+
 export async function enqueue(
   action: Omit<PendingAction, 'id' | 'createdAt' | 'status' | 'attempts'>,
 ): Promise<PendingAction> {
   return withLock(async () => {
     const db = await getDb()
+    const countRow = await db.getFirstAsync<{ c: number }>(
+      'SELECT COUNT(*) as c FROM pending_actions',
+    )
+    if ((countRow?.c ?? 0) >= QUEUE_HARD_CAP) {
+      throw new Error('Fila offline cheia (5000+) — sincronize antes de continuar')
+    }
     const entry: PendingAction = {
       ...action,
       id: uid(),
@@ -408,17 +593,41 @@ export async function patchParticipantInPacket(
     let p: MobileParticipant
     try { p = JSON.parse(r.data_json) as MobileParticipant } catch { continue }
     const merged = { ...p, ...patch }
+    // Re-aplica redação após o merge — patch pode trazer campos voláteis
+    // (ex: kitWithdrawnAt) sem reintroduzir PII (já não estava no JSON
+    // persistido, mas defensivamente re-redigimos).
+    const redacted = redactForOffline(merged)
     await db.runAsync(
       `UPDATE participants SET
         data_json = ?, status = ?, kit_withdrawn = ?, search_text = ?
         WHERE pk = ?`,
-      JSON.stringify(merged),
+      JSON.stringify(redacted),
       merged.status,
       merged.kitWithdrawnAt ? 1 : 0,
       buildSearchText(merged),
       r.pk,
     )
   }
+}
+
+/** Quantas ações pendentes/falhadas/em-sync existem pra um evento (UI). */
+export async function getPendingActionsForEvent(eventId: string): Promise<number> {
+  const db = await getDb()
+  const row = await db.getFirstAsync<{ c: number }>(
+    "SELECT COUNT(*) as c FROM pending_actions WHERE event_id = ? AND status != 'synced'",
+    eventId,
+  )
+  return row?.c ?? 0
+}
+
+/** Conta participants gravados pra um evento — usado pra checksum pós-download. */
+export async function countParticipantsInPacket(eventId: string): Promise<number> {
+  const db = await getDb()
+  const row = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) as c FROM participants WHERE event_id = ?',
+    eventId,
+  )
+  return row?.c ?? 0
 }
 
 /* ── Paginated participant queries (offline-first reads) ───────────────── */
@@ -502,6 +711,61 @@ export async function loadInventory(eventId: string): Promise<{ items: Inventory
   return { items, stats }
 }
 
+/* ── Queue backup (logout / wipeAll safety net) ────────────────────────── */
+
+/**
+ * Backup pré-wipe da fila. Salva tentativas que seriam descartadas em logout
+ * acidental (operador toca "Sair" sem perceber que há ações offline). UI
+ * pode oferecer recovery via recoverQueueBackup() se detectar backups
+ * recentes — não restauramos automaticamente porque o usuário logado depois
+ * pode ser outro (token diferente, queue do user A no contexto do user B
+ * geraria erros de auth confusos).
+ */
+export async function saveQueueBackup(actions: PendingAction[]): Promise<void> {
+  if (actions.length === 0) return
+  const ts = Date.now()
+  const key = `${QUEUE_BACKUP_PREFIX}${ts}`
+  await AsyncStorage.setItem(key, JSON.stringify({ at: ts, actions })).catch(() => {
+    // Best-effort: se o backup falha, logout não fica travado.
+  })
+}
+
+/**
+ * Lista backups existentes que ainda estão dentro do TTL (7d). Backups
+ * antigos são purgados aqui — best-effort, executado a cada chamada de
+ * hydrate pra que devices pouco usados não acumulem.
+ */
+export async function listQueueBackups(): Promise<{ key: string; at: number; count: number }[]> {
+  try {
+    const keys = await AsyncStorage.getAllKeys()
+    const backupKeys = keys.filter((k) => k.startsWith(QUEUE_BACKUP_PREFIX))
+    const now = Date.now()
+    const result: { key: string; at: number; count: number }[] = []
+    const expired: string[] = []
+    for (const k of backupKeys) {
+      const raw = await AsyncStorage.getItem(k)
+      if (!raw) continue
+      try {
+        const parsed = JSON.parse(raw) as { at?: number; actions?: unknown[] }
+        const at = parsed.at ?? 0
+        if (now - at > QUEUE_BACKUP_TTL_MS) {
+          expired.push(k)
+          continue
+        }
+        result.push({ key: k, at, count: Array.isArray(parsed.actions) ? parsed.actions.length : 0 })
+      } catch {
+        expired.push(k)
+      }
+    }
+    if (expired.length > 0) {
+      await AsyncStorage.multiRemove(expired).catch(() => {})
+    }
+    return result.sort((a, b) => b.at - a.at)
+  } catch {
+    return []
+  }
+}
+
 /* ── Migration AsyncStorage → SQLite (one-shot) ────────────────────────── */
 
 /**
@@ -510,10 +774,18 @@ export async function loadInventory(eventId: string): Promise<{ items: Inventory
  * boots checam o flag e fazem skip imediato.
  */
 export async function migrateLegacyAsyncStorage(): Promise<void> {
-  try {
-    const done = await AsyncStorage.getItem(LEGACY_MIGRATION_DONE)
-    if (done === 'true') return
+  const done = await AsyncStorage.getItem(LEGACY_MIGRATION_DONE).catch(() => null)
+  if (done === 'true') return
 
+  // Retry budget pra que falhas transitórias (storage cheio, race em SQLite
+  // open) não desistam permanente já no 1º boot — mas que também não fiquem
+  // tentando pra sempre se o packet legacy estiver corrompido. Após
+  // LEGACY_MIGRATION_MAX_ATTEMPTS, marca como done pra desbloquear o app.
+  const attemptsRaw = await AsyncStorage.getItem(LEGACY_MIGRATION_ATTEMPTS).catch(() => null)
+  const attempts = attemptsRaw ? Number.parseInt(attemptsRaw, 10) || 0 : 0
+  await AsyncStorage.setItem(LEGACY_MIGRATION_ATTEMPTS, String(attempts + 1)).catch(() => {})
+
+  try {
     // 1. Migrar index + packets
     const idxRaw = await AsyncStorage.getItem(LEGACY_KEY_INDEX)
     if (idxRaw) {
@@ -566,20 +838,24 @@ export async function migrateLegacyAsyncStorage(): Promise<void> {
       } catch { /* skip queue migration failures */ }
     }
 
-    // 3. Marca migrado e limpa AsyncStorage legacy
+    // 3. SÓ marca migrado se chegou ao fim sem throw. Caso contrário, próximo
+    // boot tenta de novo (até LEGACY_MIGRATION_MAX_ATTEMPTS).
     await AsyncStorage.setItem(LEGACY_MIGRATION_DONE, 'true')
     // Limpa as chaves antigas pra recuperar storage. Best-effort.
     const idxParsed = idxRaw ? (JSON.parse(idxRaw) as PacketMeta[]) : []
     const keysToRemove = [
       LEGACY_KEY_INDEX,
       LEGACY_KEY_QUEUE,
+      LEGACY_MIGRATION_ATTEMPTS,
       ...idxParsed.map((m) => LEGACY_KEY_PACKET(m.eventId)),
     ]
     await AsyncStorage.multiRemove(keysToRemove).catch(() => { /* ignore */ })
   } catch {
-    // Se a migration falhar, não bloqueia o boot — usuário só perde o packet
-    // antigo (precisa baixar de novo). Marcamos como done pra não tentar de
-    // novo a cada boot.
-    await AsyncStorage.setItem(LEGACY_MIGRATION_DONE, 'true').catch(() => {})
+    // Falha na migration: se já tentamos demais (>=MAX), marca como done pra
+    // desbloquear o app. Caso contrário, deixa pra próximo boot — usuário
+    // só perde o packet antigo se todas as 3 tentativas falharem.
+    if (attempts + 1 >= LEGACY_MIGRATION_MAX_ATTEMPTS) {
+      await AsyncStorage.setItem(LEGACY_MIGRATION_DONE, 'true').catch(() => {})
+    }
   }
 }

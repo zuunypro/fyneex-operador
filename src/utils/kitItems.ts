@@ -20,6 +20,14 @@ export interface StockInfo {
   currentStock: number
   reservedStock: number
   status: string
+  /**
+   * Breakdown por variante (P/M/G ou cor) — pra UI mostrar "P: 0, M: 3, G: 2"
+   * quando o operador expande o card. Sem isso, "1 em estoque" pode esconder
+   * que a variante PEDIDA tá zerada (servidor erra com KIT_NO_STOCK_CONFIGURED
+   * mesmo aparecendo estoque). Vazio/undefined quando categoria tem só uma
+   * variante (Garrafa, Brinde sem tamanho).
+   */
+  variants?: { variant: string; currentStock: number; status: string }[]
 }
 
 export interface KitItem {
