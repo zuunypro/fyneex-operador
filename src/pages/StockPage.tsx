@@ -128,6 +128,38 @@ export function StockPage() {
     return { items, low, out }
   }, [inventory.data?.items])
 
+  // Map de busca rápida pra o expand do KitRow exibir estoque ao lado
+  // de cada item do kit. Key normalizada pra "ticket - label" lowercase
+  // — bate com o formato usado em inventory_items.category.
+  const stockByCategory = useMemo(() => {
+    const map = new Map<
+      string,
+      { currentStock: number; reservedStock: number; status: string }
+    >()
+    const items = inventory.data?.items || []
+    for (const item of items) {
+      if (typeof item.category !== 'string') continue
+      const key = item.category.trim().toLowerCase()
+      if (!key) continue
+      // Se houver múltiplos items com mesma category (variantes), soma
+      // current_stock — operador vê o total disponível pra essa linha.
+      const prev = map.get(key)
+      if (prev) {
+        prev.currentStock += item.currentStock
+        prev.reservedStock += item.reservedStock
+        if (item.status === 'out' || prev.status === 'out') prev.status = 'out'
+        else if (item.status === 'low' || prev.status === 'low') prev.status = 'low'
+      } else {
+        map.set(key, {
+          currentStock: item.currentStock,
+          reservedStock: item.reservedStock,
+          status: item.status,
+        })
+      }
+    }
+    return map
+  }, [inventory.data?.items])
+
   function isForceableNoStockError(err: unknown): err is ApiError {
     return (
       err instanceof ApiError &&
@@ -490,6 +522,7 @@ export function StockPage() {
               participant={item}
               group={grouped.groupOf.get(item.id)}
               delivered={isDelivered(item)}
+              stockByCategory={stockByCategory}
               isPending={
                 withdrawMutation.isPending &&
                 withdrawMutation.variables?.participantId === item.participantId &&
@@ -622,6 +655,12 @@ function StatCell({
   )
 }
 
+interface StockInfo {
+  currentStock: number
+  reservedStock: number
+  status: string
+}
+
 const KitRow = memo(function KitRow({
   participant: p,
   delivered: isDone,
@@ -630,6 +669,7 @@ const KitRow = memo(function KitRow({
   onWithdraw,
   onRevert,
   group,
+  stockByCategory,
 }: {
   participant: MobileParticipant
   delivered: boolean
@@ -638,8 +678,54 @@ const KitRow = memo(function KitRow({
   onWithdraw: () => void
   onRevert: () => void
   group?: GroupInfo
+  stockByCategory: Map<string, StockInfo>
 }) {
   const [expanded, setExpanded] = useState(false)
+
+  // Identifica os campos do kit (Camiseta, Medalha, etc.) e busca
+  // o estoque vinculado pela category "ticket - Label". Operador no
+  // balcão precisa ver "Camiseta GG → 12 disponíveis" pra saber se
+  // ainda tem estoque do tamanho pedido SEM precisar trocar de tela.
+  const kitItems = useMemo(() => {
+    const fields = p.instanceFields || []
+    const ticketLower = (p.ticketName || '').toLowerCase().trim()
+    const isKit = (label: string) => {
+      const l = label.toLowerCase()
+      return (
+        l.includes('camiseta') ||
+        l.includes('camisa') ||
+        l.includes('medalha') ||
+        l.includes('garrafa') ||
+        l.includes('troféu') ||
+        l.includes('trofeu') ||
+        l.includes('brinde') ||
+        l.includes('kit') ||
+        l.includes('tamanho')
+      )
+    }
+    const list: Array<{ label: string; value: string; stock: StockInfo | null }> = []
+    for (const f of fields) {
+      if (!isKit(f.label)) continue
+      const stockKey = `${ticketLower} - ${f.label.toLowerCase().trim()}`
+      const stock = stockByCategory.get(stockKey) ?? null
+      list.push({ label: f.label, value: f.value, stock })
+    }
+    return list
+  }, [p.instanceFields, p.ticketName, stockByCategory])
+
+  // Headline visual no card: mostra os itens do kit + valor selecionado
+  // na linha colapsada, então operador NÃO precisa abrir pra entregar a
+  // maioria dos kits — só olha o badge e entrega. Se tem 1 item só, mostra
+  // "Camiseta GG"; com vários, "Camiseta GG · Medalha Ouro".
+  const kitSummary = useMemo(() => {
+    if (kitItems.length === 0) return null
+    return kitItems
+      .map((k) => `${k.label} ${k.value || '?'}`.trim())
+      .join(' · ')
+  }, [kitItems])
+
+  const buyerDifferent =
+    p.buyerName && p.buyerName !== 'N/A' && p.buyerName !== p.name
   return (
     <View style={[styles.row, isPending && { opacity: 0.7 }]}>
       {group ? (
@@ -691,12 +777,18 @@ const KitRow = memo(function KitRow({
               Comprador: {p.buyerName}
             </Text>
           ) : null}
+          {kitSummary ? (
+            <View style={styles.kitSummaryLine}>
+              <Icon name="redeem" size={11} color={colors.accentGreen} />
+              <Text style={styles.kitSummaryText} numberOfLines={1}>
+                {kitSummary}
+              </Text>
+            </View>
+          ) : null}
           <View style={styles.rowMeta}>
             <Text style={styles.rowMetaText} numberOfLines={1}>
               {group ? `${group.pos}/${group.total} · ` : ''}
               {p.orderNumber}
-              {p.ticketName ? ` · ${p.ticketName}` : ''}
-              {p.batch ? ` · ${p.batch}` : ''}
               {p.buyerCpfLast5 ? ` · CPF ${formatCpfLast5(p.buyerCpfLast5)}` : ' · sem CPF'}
             </Text>
             <Icon
@@ -730,93 +822,93 @@ const KitRow = memo(function KitRow({
 
       {expanded ? (
         <View style={styles.details}>
+          {/* ❶ KIT A ENTREGAR — destaque visual máximo. Operador NO BALCÃO
+                precisa enxergar tamanho selecionado + estoque restante numa
+                olhada só. Tudo o resto vem depois. */}
+          {kitItems.length > 0 ? (
+            <View>
+              <Text style={styles.detailSectionLabelPrimary}>
+                Kit a entregar
+              </Text>
+              <View style={{ gap: 8 }}>
+                {kitItems.map((k, i) => (
+                  <View key={`${k.label}-${i}`} style={styles.kitLineCard}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.kitLineLabel} numberOfLines={1}>
+                        {k.label}
+                      </Text>
+                      <Text style={styles.kitLineValue} numberOfLines={1}>
+                        {k.value || 'sem variante'}
+                      </Text>
+                    </View>
+                    {k.stock ? (
+                      <View
+                        style={[
+                          styles.stockBadge,
+                          k.stock.status === 'out' && styles.stockBadgeOut,
+                          k.stock.status === 'low' && styles.stockBadgeLow,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.stockBadgeValue,
+                            k.stock.status === 'out' && { color: colors.accentRed },
+                            k.stock.status === 'low' && { color: colors.accentOrange },
+                          ]}
+                        >
+                          {k.stock.currentStock}
+                        </Text>
+                        <Text style={styles.stockBadgeLabel}>em estoque</Text>
+                      </View>
+                    ) : (
+                      <View style={styles.stockBadge}>
+                        <Text style={[styles.stockBadgeValue, { color: colors.textTertiary }]}>—</Text>
+                        <Text style={styles.stockBadgeLabel}>sem item</Text>
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            </View>
+          ) : (
+            <View style={styles.noFormBlock}>
+              <Icon
+                name={p.nameFromForm === false ? 'priority_high' : 'info'}
+                size={14}
+                color={colors.accentOrange}
+              />
+              <Text style={styles.noFormText}>
+                {p.nameFromForm === false
+                  ? 'Participante não preencheu o formulário. Confirme pelo CPF/pedido e combine com o comprador o que entregar.'
+                  : 'Pedido sem itens de kit configurados — não tem nada pra entregar aqui.'}
+              </Text>
+            </View>
+          )}
+
+          {/* ❷ CONFERIR IDENTIDADE — só o que importa pra confirmar a pessoa. */}
           <View>
-            <Text style={styles.detailSectionLabel}>Comprador</Text>
+            <Text style={styles.detailSectionLabel}>Conferir identidade</Text>
             <View style={styles.detailGrid}>
-              <DetailField label="Nome" value={p.buyerName || '—'} />
-              <DetailField label="Email" value={p.buyerEmail || p.email || '—'} />
-              <DetailField label="Telefone" value={formatPhoneBR(p.buyerPhone)} />
               <DetailField
                 label="CPF (final)"
                 value={formatCpfLast5(p.buyerCpfLast5)}
               />
-            </View>
-          </View>
-
-          <View>
-            <Text style={styles.detailSectionLabel}>Compra</Text>
-            <View style={styles.detailGrid}>
               <DetailField label="Pedido" value={p.orderNumber || '—'} />
-              <DetailField label="Ingresso" value={p.ticketName || '—'} />
-              {p.batch ? <DetailField label="Lote" value={p.batch} /> : null}
+              {buyerDifferent ? (
+                <DetailField label="Comprador" value={p.buyerName!} />
+              ) : null}
+              {p.instanceIndex && p.instanceTotal && p.instanceTotal > 1 ? (
+                <DetailField
+                  label="Posição"
+                  value={`${p.instanceIndex} de ${p.instanceTotal}`}
+                />
+              ) : null}
             </View>
           </View>
 
-          {(() => {
-            const allFields = p.instanceFields || []
-            // Separa campos do kit (Camiseta, Medalha, Garrafa, etc.) dos
-            // dados pessoais (Nome, Email, Telefone, CPF). Operador no
-            // estoque precisa ver tamanho/cor selecionados rapidinho —
-            // por isso o "Kit / Configurações" vem com destaque, antes
-            // dos demais dados do participante.
-            const kitLabels = ['camiseta', 'medalha', 'garrafa', 'troféu', 'trofeu', 'brinde', 'kit', 'tamanho', 'cor', 'modelo', 'variante']
-            const isKitField = (label: string) => {
-              const l = label.toLowerCase()
-              return kitLabels.some((k) => l.includes(k))
-            }
-            const isIdentityField = (label: string) => {
-              const l = label.toLowerCase()
-              return l.includes('nome') || l.includes('email') || l.includes('telefone') || l.includes('cpf') || l.includes('rg')
-            }
-            const kitFields = allFields.filter((f) => isKitField(f.label))
-            const otherFields = allFields.filter(
-              (f) => !isKitField(f.label) && !isIdentityField(f.label),
-            )
-            const formUnfilled = p.nameFromForm === false && allFields.length === 0
-            return (
-              <>
-                {kitFields.length > 0 ? (
-                  <View>
-                    <Text style={styles.detailSectionLabel}>Kit / Configurações</Text>
-                    <View style={styles.detailGrid}>
-                      {kitFields.map((f) => (
-                        <DetailField key={f.label} label={f.label} value={f.value} />
-                      ))}
-                    </View>
-                  </View>
-                ) : null}
-                {otherFields.length > 0 ? (
-                  <View>
-                    <Text style={styles.detailSectionLabel}>Dados do participante</Text>
-                    <View style={styles.detailGrid}>
-                      {otherFields.map((f) => (
-                        <DetailField key={f.label} label={f.label} value={f.value} />
-                      ))}
-                    </View>
-                  </View>
-                ) : null}
-                {formUnfilled ? (
-                  <View style={styles.noFormBlock}>
-                    <Icon name="priority_high" size={14} color={colors.accentOrange} />
-                    <Text style={styles.noFormText}>
-                      Participante ainda não preencheu o formulário do evento. Confirme a identidade pelo CPF do comprador (acima) ou pelo número do pedido. Sem dados do kit selecionado — entrega tem que ser combinada com o comprador.
-                    </Text>
-                  </View>
-                ) : null}
-                {!formUnfilled && kitFields.length === 0 ? (
-                  <View style={styles.noFormBlock}>
-                    <Icon name="info" size={14} color={colors.accentOrange} />
-                    <Text style={styles.noFormText}>
-                      Pedido sem itens de kit configurados — só check-in se aplica.
-                    </Text>
-                  </View>
-                ) : null}
-              </>
-            )
-          })()}
-
+          {/* ❸ STATUS — sempre claro: pendente ou entregue + quando. */}
           <View>
-            <Text style={styles.detailSectionLabel}>Status retirada</Text>
+            <Text style={styles.detailSectionLabel}>Status</Text>
             {isDone && p.kitWithdrawnAt ? (
               <Text style={styles.statusOkText}>
                 ✓ {formatWithdrawnAt(p.kitWithdrawnAt)}
@@ -824,10 +916,13 @@ const KitRow = memo(function KitRow({
             ) : isDone ? (
               <Text style={styles.statusOkText}>✓ Kit já entregue</Text>
             ) : (
-              <Text style={styles.statusPendingText}>● Pendente — kit ainda não entregue</Text>
+              <Text style={styles.statusPendingText}>
+                ● Pendente — kit ainda não entregue
+              </Text>
             )}
           </View>
 
+          {/* ❹ AÇÕES — só Reverter quando entregue (pra corrigir engano). */}
           {isDone ? (
             <Pressable
               onPress={onRevert}
@@ -843,6 +938,23 @@ const KitRow = memo(function KitRow({
                 {isReverting ? 'Revertendo...' : 'Reverter retirada'}
               </Text>
             </Pressable>
+          ) : null}
+
+          {/* ❺ Mais info — minúsculo, só pra exceção (perdeu pedido,
+                precisa ligar pra confirmar, etc.). */}
+          {(p.buyerEmail || p.email || p.buyerPhone) ? (
+            <View style={styles.contactStrip}>
+              {p.buyerEmail || p.email ? (
+                <Text style={styles.contactStripText} numberOfLines={1}>
+                  ✉ {p.buyerEmail || p.email}
+                </Text>
+              ) : null}
+              {p.buyerPhone ? (
+                <Text style={styles.contactStripText} numberOfLines={1}>
+                  ☏ {formatPhoneBR(p.buyerPhone)}
+                </Text>
+              ) : null}
+            </View>
           ) : null}
         </View>
       ) : null}
@@ -1226,6 +1338,96 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     marginBottom: 4,
+  },
+  detailSectionLabelPrimary: {
+    fontSize: 11,
+    fontWeight: font.weight.extrabold,
+    color: colors.accentGreen,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  kitSummaryLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 3,
+  },
+  kitSummaryText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: colors.accentGreen,
+    letterSpacing: 0.2,
+  },
+  kitLineCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: radius.md,
+    backgroundColor: '#0F1F0F',
+    borderWidth: 1,
+    borderColor: '#234B23',
+  },
+  kitLineLabel: {
+    fontSize: 10,
+    fontWeight: font.weight.bold,
+    color: colors.textTertiary,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  kitLineValue: {
+    fontSize: 14,
+    fontWeight: font.weight.extrabold,
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  stockBadge: {
+    minWidth: 64,
+    alignItems: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: radius.sm,
+    backgroundColor: colors.bgBase,
+    borderWidth: 1,
+    borderColor: colors.borderMuted,
+  },
+  stockBadgeLow: {
+    borderColor: '#4B3012',
+    backgroundColor: '#1F1A0F',
+  },
+  stockBadgeOut: {
+    borderColor: '#4A1F1F',
+    backgroundColor: '#2A1414',
+  },
+  stockBadgeValue: {
+    fontSize: 16,
+    fontWeight: font.weight.extrabold,
+    color: colors.accentGreen,
+    lineHeight: 18,
+  },
+  stockBadgeLabel: {
+    fontSize: 8,
+    fontWeight: font.weight.semibold,
+    color: colors.textTertiary,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginTop: 1,
+  },
+  contactStrip: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#222222',
+  },
+  contactStripText: {
+    fontSize: 10,
+    fontWeight: font.weight.medium,
+    color: colors.textTertiary,
   },
   detailGrid: {
     flexDirection: 'row',
