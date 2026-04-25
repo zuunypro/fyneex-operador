@@ -20,7 +20,7 @@ import { useInventory } from '@/hooks/useInventory'
 import { useToast } from '@/hooks/useToast'
 import { buildSearchIndex, groupByOrder, matchByIndex, type GroupInfo } from '@/utils/participants'
 import { normalizeForSearch } from '@/utils/text'
-import { isKitFieldLabel } from '@/utils/fieldClassification'
+import { buildKitItems, formatKitSummary, kitItemsToFields, type StockInfo } from '@/utils/kitItems'
 import { formatCpfLast5, formatPhoneBR } from '@/utils/format'
 import { DetailField } from '@/components/DetailField'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
@@ -592,6 +592,7 @@ export function StockPage() {
           fieldsTitle="Kit a entregar"
           fieldsLayout="rows"
           fieldsLimit={10}
+          overrideFields={kitItemsToFields(buildKitItems(modalParticipant, stockByCategory))}
           confirmLabel="Entregar kit"
           confirmIcon={<Icon name="redeem" size={18} color={colors.textPrimary} />}
           onClose={() => setModalParticipant(null)}
@@ -606,6 +607,7 @@ export function StockPage() {
           fieldsTitle="Kit deste ingresso"
           fieldsLayout="rows"
           fieldsLimit={10}
+          overrideFields={kitItemsToFields(buildKitItems(alreadyScanned, stockByCategory))}
           confirmLabel=""
           alreadyScanned
           alreadyScannedMessage="Kit já retirado"
@@ -657,12 +659,6 @@ function StatCell({
   )
 }
 
-interface StockInfo {
-  currentStock: number
-  reservedStock: number
-  status: string
-}
-
 const KitRow = memo(function KitRow({
   participant: p,
   delivered: isDone,
@@ -684,33 +680,19 @@ const KitRow = memo(function KitRow({
 }) {
   const [expanded, setExpanded] = useState(false)
 
-  // Identifica os campos do kit (Camiseta, Medalha, etc.) e busca
-  // o estoque vinculado pela category "ticket - Label". Operador no
-  // balcão precisa ver "Camiseta GG → 12 disponíveis" pra saber se
-  // ainda tem estoque do tamanho pedido SEM precisar trocar de tela.
-  const kitItems = useMemo(() => {
-    const fields = p.instanceFields || []
-    const ticketLower = (p.ticketName || '').toLowerCase().trim()
-    const list: Array<{ label: string; value: string; stock: StockInfo | null }> = []
-    for (const f of fields) {
-      if (!isKitFieldLabel(f.label)) continue
-      const stockKey = `${ticketLower} - ${f.label.toLowerCase().trim()}`
-      const stock = stockByCategory.get(stockKey) ?? null
-      list.push({ label: f.label, value: f.value, stock })
-    }
-    return list
-  }, [p.instanceFields, p.ticketName, stockByCategory])
+  // Fonte da verdade do kit é `inventory_items` cadastrado pelo organizador
+  // pra esse ticket (não o que o cliente preencheu). Garrafa de variante
+  // única não vai pro form_responses, mas tem que aparecer no balcão pra
+  // operador entregar. Categoria customizada (Boné, Mochila) idem — antes
+  // dependia de keywords hardcoded no app, agora cobre qualquer categoria.
+  const kitItems = useMemo(
+    () => buildKitItems(p, stockByCategory),
+    [p, stockByCategory],
+  )
 
-  // Headline visual no card: mostra os itens do kit + valor selecionado
-  // na linha colapsada, então operador NÃO precisa abrir pra entregar a
-  // maioria dos kits — só olha o badge e entrega. Se tem 1 item só, mostra
-  // "Camiseta GG"; com vários, "Camiseta GG · Medalha Ouro".
-  const kitSummary = useMemo(() => {
-    if (kitItems.length === 0) return null
-    return kitItems
-      .map((k) => `${k.label} ${k.value || '?'}`.trim())
-      .join(' · ')
-  }, [kitItems])
+  // Headline visual no card colapsado: "Camiseta GG · Garrafa · Medalha Ouro".
+  // Sem variante (Garrafa) mostra só o nome — antes saía "Garrafa ?".
+  const kitSummary = useMemo(() => formatKitSummary(kitItems), [kitItems])
 
   const buyerDifferent =
     p.buyerName && p.buyerName !== 'N/A' && p.buyerName !== p.name
@@ -825,9 +807,15 @@ const KitRow = memo(function KitRow({
                       <Text style={styles.kitLineLabel} numberOfLines={1}>
                         {k.label}
                       </Text>
-                      <Text style={styles.kitLineValue} numberOfLines={1}>
-                        {k.value || 'sem variante'}
-                      </Text>
+                      {k.value ? (
+                        <Text style={styles.kitLineValue} numberOfLines={1}>
+                          {k.value}
+                        </Text>
+                      ) : (
+                        <View style={styles.kitVariantTag}>
+                          <Text style={styles.kitVariantTagLabel}>Único</Text>
+                        </View>
+                      )}
                     </View>
                     {k.stock ? (
                       <View
@@ -1365,6 +1353,27 @@ const styles = StyleSheet.create({
     fontWeight: font.weight.extrabold,
     color: colors.textPrimary,
     marginTop: 2,
+  },
+  // Tag pequena pra item sem variante (Garrafa, Brinde de tamanho único).
+  // Visualmente lembra um chip de "default" — não compete com a variante
+  // negrito grande, mas confirma pro operador que tem que entregar mesmo
+  // sem o cliente ter "escolhido" nada no formulário.
+  kitVariantTag: {
+    alignSelf: 'flex-start',
+    marginTop: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: radius.sm,
+    backgroundColor: '#173524',
+    borderWidth: 1,
+    borderColor: '#2C5C42',
+  },
+  kitVariantTagLabel: {
+    fontSize: 9,
+    fontWeight: font.weight.bold,
+    color: colors.accentGreen,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
   },
   stockBadge: {
     minWidth: 64,

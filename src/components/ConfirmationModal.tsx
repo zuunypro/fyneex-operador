@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native'
 import { colors, font, radius } from '@/theme'
-import type { MobileParticipant } from '@/hooks/useParticipants'
+import type { InstanceField, MobileParticipant } from '@/hooks/useParticipants'
 import { formatCpfLast5 } from '@/utils/format'
 import { Icon } from './Icon'
 
@@ -26,6 +26,11 @@ interface ConfirmationModalProps {
   fieldsLimit?: number
   fieldsTitle?: string
   fieldsExcludeLabelRegex?: RegExp
+  /** Substitui `participant.instanceFields` na renderização da seção de
+   *  campos. Usado pelo Estoque pra mostrar o kit a entregar derivado de
+   *  `inventory_items` (que inclui Garrafa/Brinde de variante única que
+   *  não vão pro form_responses) em vez do que o cliente preencheu. */
+  overrideFields?: InstanceField[]
   confirmLabel: string
   confirmIcon?: ReactNode
   submitting?: boolean
@@ -56,10 +61,12 @@ export function ConfirmationModal({
   alreadyScanned = false,
   alreadyScannedMessage = 'Este QR já foi escaneado',
   alreadyScannedDetail,
+  overrideFields,
 }: ConfirmationModalProps) {
   const showObs = !alreadyScanned && typeof obsText === 'string' && typeof onObsChange === 'function'
 
-  const allFields = (p.instanceFields || []).filter((f) =>
+  const sourceFields = overrideFields ?? p.instanceFields ?? []
+  const allFields = sourceFields.filter((f) =>
     fieldsExcludeLabelRegex ? !fieldsExcludeLabelRegex.test(f.label) : true,
   )
   const visibleFields = allFields.slice(0, fieldsLimit)
