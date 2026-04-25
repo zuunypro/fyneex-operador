@@ -590,12 +590,17 @@ const ParticipantRow = memo(function ParticipantRow({
         <View style={styles.details}>
           <View>
             <Text style={styles.detailSectionLabel}>Comprador</Text>
-            <Text style={styles.detailBuyer} numberOfLines={1}>{p.buyerName || p.name}</Text>
-            {(p.buyerEmail || p.email) ? (
-              <Text style={styles.detailBuyerEmail} numberOfLines={1}>
-                {p.buyerEmail || p.email}
-              </Text>
-            ) : null}
+            {/* 4 dados sempre visíveis (Nome, Email, Telefone, CPF) — usar
+                "—" quando ausente pra operador entender que é gap, não bug. */}
+            <View style={styles.detailGrid}>
+              <DetailField label="Nome" value={p.buyerName || '—'} />
+              <DetailField label="Email" value={p.buyerEmail || p.email || '—'} />
+              <DetailField label="Telefone" value={p.buyerPhone || '—'} />
+              <DetailField
+                label="CPF (final)"
+                value={p.buyerCpfLast5 ? `····${p.buyerCpfLast5}` : '—'}
+              />
+            </View>
           </View>
 
           <View>
@@ -604,9 +609,6 @@ const ParticipantRow = memo(function ParticipantRow({
               <DetailField label="Pedido" value={p.orderNumber || '—'} />
               <DetailField label="Ingresso" value={p.ticketName || '—'} />
               {p.batch ? <DetailField label="Lote" value={p.batch} /> : null}
-              {p.buyerCpfLast5 ? (
-                <DetailField label="CPF (final)" value={`····${p.buyerCpfLast5}`} />
-              ) : null}
             </View>
           </View>
 

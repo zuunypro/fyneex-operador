@@ -27,6 +27,8 @@ export interface MobileParticipant {
   instanceFields?: InstanceField[]
   buyerName?: string
   buyerEmail?: string
+  /** Telefone do comprador, string crua (formato varia por organizador). */
+  buyerPhone?: string
   /** Últimos 5 dígitos do CPF do comprador (servidor nunca envia completo). */
   buyerCpfLast5?: string
   hasKit?: boolean
