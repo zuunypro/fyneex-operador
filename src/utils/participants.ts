@@ -1,4 +1,5 @@
 import type { MobileParticipant } from '@/hooks/useParticipants'
+import { normalizeForSearch } from '@/utils/text'
 
 export interface GroupInfo {
   pos: number
@@ -57,21 +58,25 @@ export function groupByOrder(participants: MobileParticipant[]): GroupedParticip
   return { items, groupOf }
 }
 
-/** Case-insensitive. Cobre nome do participante, nome do comprador, número
- *  do pedido, últimos 5 do CPF do comprador e campos do formulário. Mantido
- *  em sync com `applyFilters` no servidor (`participants.tsx`) e com
- *  `buildSearchText` em `services/offline.ts`. */
-export function matchParticipant(p: MobileParticipant, searchLower: string): boolean {
-  if (!searchLower) return true
-  const sDigits = searchLower.replace(/\D/g, '')
+/** Case-insensitive + accent-insensitive. Cobre nome do participante, nome
+ *  do comprador, número do pedido, últimos 5 do CPF do comprador e campos
+ *  do formulário. Mantido em sync com `applyFilters` no servidor
+ *  (`participants.tsx`) e com `buildSearchText` em `services/offline.ts`.
+ *
+ *  Aceita o input cru do TextInput (`searchRaw`) — normaliza internamente
+ *  pra remover acentos. "João" digitado como "joao" agora bate. */
+export function matchParticipant(p: MobileParticipant, searchRaw: string): boolean {
+  const s = normalizeForSearch(searchRaw)
+  if (!s) return true
+  const sDigits = searchRaw.replace(/\D/g, '')
   // Defesa em profundidade: o tipo garante string, mas packets antigos / sync
   // legado podem ter campos null e crashar `.toLowerCase()`.
   return (
-    (p.name ?? '').toLowerCase().includes(searchLower) ||
-    (p.buyerName ?? '').toLowerCase().includes(searchLower) ||
-    (p.participantId ?? '').toLowerCase().includes(searchLower) ||
-    (p.orderNumber ?? '').toLowerCase().includes(searchLower) ||
+    normalizeForSearch(p.name ?? '').includes(s) ||
+    normalizeForSearch(p.buyerName ?? '').includes(s) ||
+    normalizeForSearch(p.participantId ?? '').includes(s) ||
+    normalizeForSearch(p.orderNumber ?? '').includes(s) ||
     (sDigits.length >= 3 && (p.buyerCpfLast5 ?? '').includes(sDigits)) ||
-    (p.instanceFields?.some((f) => (f.value ?? '').toLowerCase().includes(searchLower)) ?? false)
+    (p.instanceFields?.some((f) => normalizeForSearch(f.value ?? '').includes(s)) ?? false)
   )
 }

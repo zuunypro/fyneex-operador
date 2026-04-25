@@ -23,6 +23,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import type { MobileParticipant } from '@/hooks/useParticipants'
 import type { InventoryItem, InventoryStats } from '@/hooks/useInventory'
+import { normalizeForSearch } from '@/utils/text'
 import { getDb, withTransaction } from './db'
 
 // Chaves AsyncStorage legacy — mantidas só pra migration one-shot do v1.
@@ -107,12 +108,19 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
 /* ── Search-text builder (denormalized) ────────────────────────────────── */
 
 /**
- * Concatena os campos buscáveis em uma string lowercase única, gravada na
- * coluna `search_text` pra busca via LIKE indexado. Mantido em sync com
- * `matchParticipant` em utils/participants.ts.
+ * Concatena os campos buscáveis em uma string lowercase + sem acentos única,
+ * gravada na coluna `search_text` pra busca via LIKE indexado. Mantido em
+ * sync com `matchParticipant` em utils/participants.ts.
  *
  * Inclui buyerName e buyerCpfLast5 pra que operador no portão consiga buscar
  * por "quem comprou" e pelos últimos dígitos do CPF que o cliente passa.
+ *
+ * O normalize remove acentos pra que "joão" e "joao" sejam equivalentes —
+ * teclado mobile na pressa raramente acerta acento. Pra que essa equivalência
+ * funcione no LIKE, o lado do usuário (input search) também precisa passar
+ * pelo mesmo normalizeForSearch antes da query (feito em useParticipants
+ * online via `applyFilters` server-side e em `loadParticipantsPaginated`
+ * offline via search param que será normalizado no caller).
  */
 function buildSearchText(p: MobileParticipant): string {
   const parts = [
@@ -123,7 +131,7 @@ function buildSearchText(p: MobileParticipant): string {
     p.buyerCpfLast5 ?? '',
     ...(p.instanceFields?.map((f) => f.value ?? '') ?? []),
   ]
-  return parts.join(' ').toLowerCase()
+  return normalizeForSearch(parts.join(' '))
 }
 
 /* ── Packets (snapshots) ────────────────────────────────────────────────── */
@@ -445,8 +453,11 @@ export async function loadParticipantsPaginated(
   const params: (string | number)[] = [eventId]
 
   if (opts.search && opts.search.trim()) {
+    // Normaliza o input do operador (lowercase + sem acentos) pra casar com
+    // search_text que foi gravado já normalizado em buildSearchText. Sem essa
+    // simetria, "joao" digitado pelo operador não casaria com "joão" do form.
     filters.push('search_text LIKE ?')
-    params.push(`%${opts.search.trim().toLowerCase()}%`)
+    params.push(`%${normalizeForSearch(opts.search.trim())}%`)
   }
   if (opts.status === 'pending') {
     filters.push("status = 'pending'")

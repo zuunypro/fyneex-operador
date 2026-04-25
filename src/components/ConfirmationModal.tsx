@@ -93,12 +93,17 @@ export function ConfirmationModal({
               </View>
               <View style={styles.participantBody}>
                 <Text style={styles.participantName} numberOfLines={1}>{p.name}</Text>
+                {p.nameFromForm === false && p.buyerName && p.buyerName !== 'N/A' ? (
+                  <Text style={styles.participantBuyerHint} numberOfLines={1}>
+                    Comprador: {p.buyerName}
+                  </Text>
+                ) : null}
                 <Text style={styles.participantMeta} numberOfLines={1}>
                   {p.orderNumber}
                   {p.ticketName ? ` · ${p.ticketName}` : ''}
                   {p.batch ? ` · ${p.batch}` : ''}
                   {p.instanceLabel ? ` · ${p.instanceLabel}` : ''}
-                  {p.buyerCpfLast5 ? ` · ····${p.buyerCpfLast5}` : ''}
+                  {p.buyerCpfLast5 ? ` · ····${p.buyerCpfLast5}` : ' · sem CPF'}
                 </Text>
               </View>
             </View>
@@ -264,6 +269,13 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: font.weight.bold,
     color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  participantBuyerHint: {
+    fontSize: 11,
+    fontWeight: font.weight.medium,
+    color: colors.textTertiary,
+    fontStyle: 'italic',
     marginBottom: 2,
   },
   participantMeta: {

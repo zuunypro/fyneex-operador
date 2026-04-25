@@ -19,6 +19,8 @@ import { useRevertKit } from '@/hooks/useRevertKit'
 import { useInventory } from '@/hooks/useInventory'
 import { useToast } from '@/hooks/useToast'
 import { groupByOrder, matchParticipant, type GroupInfo } from '@/utils/participants'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { StalePacketWarning } from '@/components/StalePacketWarning'
 import { feedbackBad, feedbackOk } from '@/utils/feedback'
 import { QRScanner, type ScannedToken } from '@/components/QRScanner'
 import { InstanceSelectorModal } from '@/components/InstanceSelectorModal'
@@ -80,16 +82,18 @@ export function StockPage() {
     [],
   )
 
+  // Debounce 250ms — sem isso cada keystroke filtrava 30k+ participantes.
+  // matchParticipant normaliza acentos internamente, então passa o cru.
+  const debouncedSearch = useDebouncedValue(search, 250)
   const filtered = useMemo(() => {
-    const s = search.toLowerCase()
     return participants.filter((p) => {
-      if (!matchParticipant(p, s)) return false
+      if (!matchParticipant(p, debouncedSearch)) return false
       const done = isDelivered(p)
       if (filter === 'all') return true
       if (filter === 'pending') return !done
       return done
     })
-  }, [participants, search, filter, isDelivered])
+  }, [participants, debouncedSearch, filter, isDelivered])
 
   const counts = useMemo(() => {
     let deliveredCount = 0
@@ -352,6 +356,8 @@ export function StockPage() {
           label="Taxa"
         />
       </View>
+
+      <StalePacketWarning />
 
       {inventorySummary && inventorySummary.items.length > 0 ? (
         <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
@@ -659,16 +665,21 @@ const KitRow = memo(function KitRow({
             ) : null}
             {p.nameFromForm === false ? (
               <View style={styles.buyerFallbackBadge}>
-                <Text style={styles.buyerFallbackLabel}>comprador</Text>
+                <Text style={styles.buyerFallbackLabel}>form pendente</Text>
               </View>
             ) : null}
           </View>
+          {p.nameFromForm === false && p.buyerName && p.buyerName !== 'N/A' ? (
+            <Text style={styles.buyerHint} numberOfLines={1}>
+              Comprador: {p.buyerName}
+            </Text>
+          ) : null}
           <Text style={styles.rowMetaText} numberOfLines={1}>
             {group ? `${group.pos}/${group.total} · ` : ''}
             {p.orderNumber}
             {p.ticketName ? ` · ${p.ticketName}` : ''}
             {p.batch ? ` · ${p.batch}` : ''}
-            {p.buyerCpfLast5 ? ` · CPF ····${p.buyerCpfLast5}` : ''}
+            {p.buyerCpfLast5 ? ` · CPF ····${p.buyerCpfLast5}` : ' · sem CPF'}
           </Text>
         </View>
 
@@ -1032,6 +1043,13 @@ const styles = StyleSheet.create({
     color: colors.accentOrange,
     textTransform: 'uppercase',
     letterSpacing: 0.3,
+  },
+  buyerHint: {
+    fontSize: 11,
+    fontWeight: font.weight.medium,
+    color: colors.textTertiary,
+    marginTop: 2,
+    fontStyle: 'italic',
   },
   rowMetaText: {
     fontSize: 11,
