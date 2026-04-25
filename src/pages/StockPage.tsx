@@ -873,7 +873,10 @@ const KitRow = memo(function KitRow({
             </View>
           )}
 
-          {/* ❷ CONFERIR IDENTIDADE — só o que importa pra confirmar a pessoa. */}
+          {/* ❷ CONFERIR IDENTIDADE — CPF + Pedido + Comprador (se diferente).
+                Telefone fica aqui também porque operador no balcão de
+                kit liga pro comprador quando: ingresso transferido,
+                pedido perdido, ou tamanho indisponível pra trocar. */}
           <View>
             <Text style={styles.detailSectionLabel}>Conferir identidade</Text>
             <View style={styles.detailGrid}>
@@ -882,6 +885,7 @@ const KitRow = memo(function KitRow({
                 value={formatCpfLast5(p.buyerCpfLast5)}
               />
               <DetailField label="Pedido" value={p.orderNumber || '—'} />
+              <DetailField label="Telefone" value={formatPhoneBR(p.buyerPhone)} />
               {buyerDifferent ? (
                 <DetailField label="Comprador" value={p.buyerName!} />
               ) : null}
@@ -928,18 +932,17 @@ const KitRow = memo(function KitRow({
             </Pressable>
           ) : null}
 
-          {/* ❺ Mais info — minúsculo, só pra exceção (perdeu pedido,
-                precisa ligar pra confirmar, etc.). */}
-          {(p.buyerEmail || p.email || p.buyerPhone) ? (
+          {/* ❺ Email — só pra exceção (mandar email pro comprador
+                pedindo confirmação). Telefone subiu pra identidade. */}
+          {(p.buyerEmail || p.email) ? (
             <View style={styles.contactStrip}>
-              {p.buyerEmail || p.email ? (
+              <Text style={styles.contactStripText} numberOfLines={1}>
+                ✉ {p.buyerEmail || p.email}
+              </Text>
+              {p.ticketName ? (
                 <Text style={styles.contactStripText} numberOfLines={1}>
-                  ✉ {p.buyerEmail || p.email}
-                </Text>
-              ) : null}
-              {p.buyerPhone ? (
-                <Text style={styles.contactStripText} numberOfLines={1}>
-                  ☏ {formatPhoneBR(p.buyerPhone)}
+                  🎫 {p.ticketName}
+                  {p.batch ? ` · ${p.batch}` : ''}
                 </Text>
               ) : null}
             </View>
