@@ -14,9 +14,11 @@ interface CheckinPayload {
 interface CheckinResponse {
   success: boolean
   code?: string
+  action?: string
   checkedInAt?: string
   instanceIndex?: number
   allValidated?: boolean
+  kitWithdrawn?: boolean
   error?: string
   participant?: {
     name: string

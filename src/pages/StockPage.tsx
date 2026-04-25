@@ -24,6 +24,7 @@ import { QRScanner, type ScannedToken } from '@/components/QRScanner'
 import { InstanceSelectorModal } from '@/components/InstanceSelectorModal'
 import { ConfirmationModal } from '@/components/ConfirmationModal'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { ForceWithdrawalModal } from '@/components/ForceWithdrawalModal'
 import { Toast } from '@/components/Toast'
 import { Icon } from '@/components/Icon'
 
@@ -49,6 +50,14 @@ export function StockPage() {
   const [alreadyScanned, setAlreadyScanned] = useState<MobileParticipant | null>(null)
   const [revertTarget, setRevertTarget] = useState<MobileParticipant | null>(null)
   const [showInventorySummary, setShowInventorySummary] = useState(false)
+  // Servidor recusou retirada por falta de estoque vinculado (422
+  // KIT_NO_STOCK_CONFIGURED). Operador pode forçar com motivo — re-tenta com
+  // allowNoStock=true. Mantemos o participant + serverMessage pra reabrir o
+  // modal com contexto e o continuação (ex: avançar próximo scan) depois.
+  const [forcePrompt, setForcePrompt] = useState<{
+    participant: MobileParticipant
+    serverMessage?: string
+  } | null>(null)
 
   const { toast, show: showToast } = useToast()
   const { data, isLoading, isFetching, isError, refetch } = useParticipants(event.id, { pageSize: 500 })
@@ -102,6 +111,14 @@ export function StockPage() {
     return { items, low, out }
   }, [inventory.data?.items])
 
+  function isForceableNoStockError(err: unknown): err is ApiError {
+    return (
+      err instanceof ApiError &&
+      err.status === 422 &&
+      (err.code === 'KIT_NO_STOCK_CONFIGURED' || err.code === 'FORCE_REASON_REQUIRED')
+    )
+  }
+
   async function handleWithdraw(p: MobileParticipant) {
     if (withdrawMutation.isPending) return
     setModalParticipant(null)
@@ -122,8 +139,38 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Kit já havia sido retirado', 'success')
+      } else if (isForceableNoStockError(err)) {
+        setForcePrompt({ participant: p, serverMessage: err.message })
       } else {
         showToast(friendlyError(err, 'Erro ao entregar kit'), 'error')
+      }
+    }
+  }
+
+  async function executeForceWithdraw(reason: string) {
+    if (!forcePrompt) return
+    const p = forcePrompt.participant
+    try {
+      const res = await withdrawMutation.mutateAsync({
+        participantId: p.participantId,
+        eventId: event.id,
+        instanceIndex: p.instanceIndex,
+        allowNoStock: true,
+        allowNoStockReason: reason,
+      })
+      setForcePrompt(null)
+      if (res?.implicitCheckIn) {
+        showToast('Retirada forçada + check-in validado', 'success')
+      } else {
+        showToast('Retirada forçada registrada', 'success')
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setForcePrompt(null)
+        showToast('Kit já havia sido retirado', 'success')
+      } else {
+        // Mantém o modal aberto pra operador ajustar motivo / cancelar
+        showToast(friendlyError(err, 'Erro ao forçar retirada'), 'error')
       }
     }
   }
@@ -183,6 +230,15 @@ export function StockPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         showToast('Kit já havia sido retirado', 'success')
+      } else if (isForceableNoStockError(err)) {
+        // QR não tinha matches locais (participantes desconhecido pro app), mas o
+        // servidor encontrou e recusou por falta de estoque. Não temos um
+        // MobileParticipant pra abrir o ForceWithdrawalModal — orienta o operador
+        // a buscar manualmente, onde o fluxo de força tá disponível.
+        showToast(
+          'Sem estoque vinculado — busque o participante na lista pra forçar',
+          'error',
+        )
       } else {
         showToast(friendlyError(err, 'Erro ao entregar kit'), 'error')
       }
@@ -516,6 +572,16 @@ export function StockPage() {
         onConfirm={() => revertTarget && executeRevertKit(revertTarget)}
         onCancel={() => setRevertTarget(null)}
       />
+
+      {forcePrompt ? (
+        <ForceWithdrawalModal
+          participantName={forcePrompt.participant.name}
+          serverMessage={forcePrompt.serverMessage}
+          submitting={withdrawMutation.isPending}
+          onConfirm={executeForceWithdraw}
+          onClose={() => setForcePrompt(null)}
+        />
+      ) : null}
     </View>
   )
 }

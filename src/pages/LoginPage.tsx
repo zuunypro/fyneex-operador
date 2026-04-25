@@ -216,9 +216,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   logo: {
-    width: 180,
-    height: 60,
-    marginBottom: 8,
+    width: 96,
+    height: 96,
+    borderRadius: 20,
+    marginBottom: 12,
   },
   brandingLabel: {
     fontSize: 11,

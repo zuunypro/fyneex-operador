@@ -26,11 +26,14 @@ const DEFAULT_API_TIMEOUT_MS = 30_000
 export class ApiError extends Error {
   status: number
   code?: string
-  constructor(message: string, status: number, code?: string) {
+  /** Seconds to wait before retrying — populated from the Retry-After header on 429. */
+  retryAfter?: number
+  constructor(message: string, status: number, code?: string, retryAfter?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.retryAfter = retryAfter
   }
 }
 
@@ -63,7 +66,15 @@ async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const message = (data.error as string) || `HTTP ${res.status}`
     const code = data.code as string | undefined
-    throw new ApiError(message, res.status, code)
+    let retryAfter: number | undefined
+    if (res.status === 429) {
+      const raw = res.headers.get('Retry-After')
+      if (raw) {
+        const parsed = parseInt(raw, 10)
+        if (Number.isFinite(parsed) && parsed > 0) retryAfter = parsed
+      }
+    }
+    throw new ApiError(message, res.status, code, retryAfter)
   }
   return data as T
 }
@@ -110,10 +121,15 @@ export async function apiPost<T>(
   path: string,
   body: unknown,
   signal?: AbortSignal,
+  extraHeaders?: Record<string, string>,
 ): Promise<T> {
   const res = await doFetch(
     `${BASE_URL}${path}`,
-    { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body) },
+    {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), ...extraHeaders },
+      body: JSON.stringify(body),
+    },
     signal,
   )
   return handleResponse<T>(res)

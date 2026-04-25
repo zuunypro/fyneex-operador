@@ -60,10 +60,12 @@ export function groupByOrder(participants: MobileParticipant[]): GroupedParticip
 /** Case-insensitive; checks name, participantId, orderNumber e instance fields. */
 export function matchParticipant(p: MobileParticipant, searchLower: string): boolean {
   if (!searchLower) return true
+  // Defesa em profundidade: o tipo garante string, mas packets antigos / sync
+  // legado podem ter campos null e crashar `.toLowerCase()`.
   return (
-    p.name.toLowerCase().includes(searchLower) ||
-    p.participantId.toLowerCase().includes(searchLower) ||
-    p.orderNumber.toLowerCase().includes(searchLower) ||
-    (p.instanceFields?.some((f) => f.value.toLowerCase().includes(searchLower)) ?? false)
+    (p.name ?? '').toLowerCase().includes(searchLower) ||
+    (p.participantId ?? '').toLowerCase().includes(searchLower) ||
+    (p.orderNumber ?? '').toLowerCase().includes(searchLower) ||
+    (p.instanceFields?.some((f) => (f.value ?? '').toLowerCase().includes(searchLower)) ?? false)
   )
 }

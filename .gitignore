@@ -12,6 +12,9 @@ yarn-error.*
 dist/
 web-build/
 
+# Backups locais antes de mudanças de assets — não publica.
+assets/_backup_*/
+
 # Native
 *.orig.*
 *.jks

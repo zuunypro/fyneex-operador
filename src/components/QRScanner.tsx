@@ -44,9 +44,15 @@ function base64UrlDecode(input: string): string {
   return globalThis.atob(fixed)
 }
 
+/** Tokens reais ficam em ~180-260 chars; cap em 1KB cobre folga e bloqueia
+ *  payloads gigantes via input manual ou QR adversarial (atob de MB-size
+ *  trava o JS thread no Hermes). */
+const MAX_QR_TOKEN_LEN = 1024
+
 export function parseFyneexQrToken(raw: string): ScannedToken | null {
   if (!raw) return null
   const trimmed = raw.trim()
+  if (trimmed.length > MAX_QR_TOKEN_LEN) return null
 
   if (trimmed.startsWith('fyx.')) {
     const parts = trimmed.split('.')

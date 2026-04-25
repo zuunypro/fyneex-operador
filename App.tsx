@@ -8,6 +8,7 @@ import * as Updates from 'expo-updates'
 import { QueryClient, QueryClientProvider, focusManager, useQueryClient } from '@tanstack/react-query'
 import { AppShell } from '@/components/AppShell'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { ApiError } from '@/services/api'
 import { colors } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useOfflineStore } from '@/stores/offlineStore'
@@ -59,11 +60,38 @@ function AppRouter() {
   const isLoggedIn = useNavigationStore((s) => s.isLoggedIn)
   const selectedEvent = useNavigationStore((s) => s.selectedEvent)
   const setIsLoggedIn = useNavigationStore((s) => s.setIsLoggedIn)
+  const logout = useNavigationStore((s) => s.logout)
   const setUser = useUserStore((s) => s.setUser)
   const hydrateOffline = useOfflineStore((s) => s.hydrate)
   const online = useOfflineStore((s) => s.online)
   const queryClient = useQueryClient()
   const [hydrated, setHydrated] = useState(false)
+
+  // Logout automático ao detectar 401 em qualquer query/mutation. Antes disso
+  // apenas EventSelectorPage tratava — operador no portão tomava 401 numa
+  // mutation de checkin/withdrawal e via toast "saia e entre de novo" sem ser
+  // efetivamente deslogado, exigindo navegação manual até Profile pra clicar
+  // sair. O listener global cobre todos os hooks (`useCheckin`, `useKitWithdrawal`,
+  // `useParticipants`, etc.) e dispara o mesmo `logout()` do navigationStore.
+  useEffect(() => {
+    if (!isLoggedIn) return
+    const handleAuthError = (err: unknown) => {
+      if (err instanceof ApiError && err.status === 401) {
+        logout().catch(() => { /* logout sempre best-effort */ })
+      }
+    }
+    const queryUnsub = queryClient.getQueryCache().subscribe((event) => {
+      if (event.type === 'updated' && event.query.state.error) {
+        handleAuthError(event.query.state.error)
+      }
+    })
+    const mutUnsub = queryClient.getMutationCache().subscribe((event) => {
+      if (event.type === 'updated' && event.mutation.state.error) {
+        handleAuthError(event.mutation.state.error)
+      }
+    })
+    return () => { queryUnsub(); mutUnsub() }
+  }, [isLoggedIn, queryClient, logout])
 
   // Invalida queries quando o app volta pra online. Sem isso, a lista de
   // participants/inventory continua mostrando os dados cacheados do offline

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '@/services/api'
-import { loadPacket } from '@/services/offline'
+import { loadInventory } from '@/services/offline'
 import { useOfflineStore } from '@/stores/offlineStore'
 
 export type InventoryStatus = 'ok' | 'low' | 'out'
@@ -66,11 +66,14 @@ export function useInventory(eventId: string, options: UseInventoryOptions = {})
     queryKey: ['mobile', 'inventory', eventId, { search, status, page, pageSize, online }],
     queryFn: async () => {
       if (online === false) {
-        const packet = await loadPacket(eventId)
-        if (!packet) {
+        // loadInventory retorna só items+stats — não carrega os 30k participants
+        // do packet. Inventário tem volume baixo (~50 items típico), filtro
+        // client-side roda em ms.
+        const inv = await loadInventory(eventId)
+        if (!inv) {
           throw new Error('Sem dados offline pra este evento. Baixe em Perfil → Offline.')
         }
-        const all = packet.inventory.items
+        const all = inv.items
         const s = search.toLowerCase()
         const filtered = all.filter((i) => {
           if (status !== 'all' && i.status !== status) return false
@@ -86,7 +89,7 @@ export function useInventory(eventId: string, options: UseInventoryOptions = {})
           total: filtered.length,
           page,
           pageSize,
-          stats: packet.inventory.stats || emptyStats(),
+          stats: inv.stats || emptyStats(),
         } as InventoryResponse
       }
       return apiGet<InventoryResponse>(

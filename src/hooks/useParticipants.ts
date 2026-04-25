@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '@/services/api'
-import { loadPacket } from '@/services/offline'
+import { loadParticipantsPaginated } from '@/services/offline'
 import { useOfflineStore } from '@/stores/offlineStore'
 
 export interface InstanceField {
@@ -63,32 +63,23 @@ export function useParticipants(eventId: string, options: UseParticipantsOptions
     // o cache e force a query a re-executar com o caminho correto (API vs packet).
     queryKey: ['mobile', 'participants', eventId, { search, status, page, pageSize, online }],
     queryFn: async () => {
-      // Offline: tenta servir do packet local. Busca/filtro são aplicados
-      // client-side pra replicar a experiência online.
+      // Offline: query paginada direto no SQLite. Antes carregávamos o
+      // packet inteiro em RAM e filtrávamos com .filter() — não escalava
+      // pra eventos de 30k. SQLite usa índice em (event_id, search_text)
+      // pra busca em ms mesmo com volume grande.
       if (online === false) {
-        const packet = await loadPacket(eventId)
-        if (!packet) throw new Error('Sem dados offline pra este evento. Baixe em Perfil → Offline.')
-        const all = packet.participants
-        const s = search.toLowerCase()
-        const filtered = all.filter((p) => {
-          if (status === 'pending' && p.status !== 'pending') return false
-          if (status === 'checked' && p.status !== 'checked') return false
-          if (!s) return true
-          return (
-            p.name.toLowerCase().includes(s) ||
-            p.participantId.toLowerCase().includes(s) ||
-            p.orderNumber.toLowerCase().includes(s)
-          )
-        })
-        // Clamp page pra não retornar array vazio se caller pedir página além do limite.
-        const maxPage = pageSize > 0 ? Math.max(0, Math.ceil(filtered.length / pageSize) - 1) : 0
-        const safePage = Math.min(page, maxPage)
-        return {
-          participants: filtered.slice(safePage * pageSize, (safePage + 1) * pageSize),
-          total: filtered.length,
-          page: safePage,
+        const result = await loadParticipantsPaginated(eventId, {
+          search,
+          status,
+          page,
           pageSize,
-        } as ParticipantsResponse
+        })
+        if (result.total === 0 && page === 0 && !search && status === 'all') {
+          // Total zero numa query sem filtro = não tem packet local pra esse
+          // evento. Diferencia de "filtro não casou" (que é total=0 com search).
+          throw new Error('Sem dados offline pra este evento. Baixe em Perfil → Offline.')
+        }
+        return result as ParticipantsResponse
       }
       return apiGet<ParticipantsResponse>(
         `/api/mobile/events/${eventId}/participants?${params.toString()}`,

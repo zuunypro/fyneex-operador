@@ -17,7 +17,7 @@ import {
   clearQueue,
   loadIndex,
   loadQueue,
-  loadPacket,
+  migrateLegacyAsyncStorage,
   removeFromQueue,
   removeFromQueueByEvent,
   removePacket,
@@ -71,6 +71,29 @@ interface OfflineState {
 const MAX_AUTO_ATTEMPTS = 3
 const ACTION_TIMEOUT_MS = 15_000
 
+/** Cap do backoff (60s). Acima disso, espera é demais e operador deve drenar manual. */
+const BACKOFF_CAP_MS = 60_000
+
+/**
+ * Calcula o instante da próxima tentativa após uma falha retryable.
+ * Fórmula: `min(cap, base * 2^attempts) + jitter`. O jitter (0-500ms) evita
+ * thundering herd quando múltiplos scanners voltam online simultaneamente —
+ * sem ele, todos retentariam no mesmo tick e atacariam o servidor em rajada.
+ */
+function computeNextRetryAt(attempts: number): string {
+  const base = 1_000
+  const exp = Math.min(BACKOFF_CAP_MS, base * 2 ** Math.max(0, attempts - 1))
+  const jitter = Math.floor(Math.random() * 500)
+  return new Date(Date.now() + exp + jitter).toISOString()
+}
+
+/** Ação está pronta pra próxima tentativa? `nextRetryAt` ausente = sim (primeira). */
+function isReadyForRetry(action: PendingAction, nowMs: number): boolean {
+  if (!action.nextRetryAt) return true
+  const t = Date.parse(action.nextRetryAt)
+  return Number.isNaN(t) || t <= nowMs
+}
+
 function humanizeError(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.code === 'TIMEOUT') return 'Timeout (rede lenta)'
@@ -90,6 +113,11 @@ function humanizeError(err: unknown): string {
  * subjacente em vez de só ignorar a resposta como o Promise.race fazia.
  */
 async function callApi(action: PendingAction, signal: AbortSignal): Promise<void> {
+  // Idempotency-Key é o `action.id` gerado em enqueue() — único por intenção
+  // do operador. Servidor pode usar pra dedupe explícito; cliente garante que
+  // retentativas dessa mesma ação carregam a mesma chave (mesmo após reload
+  // do app, porque o id vive no AsyncStorage da fila).
+  const idempotencyHeaders = { 'Idempotency-Key': action.id }
   if (action.type === 'checkin') {
     await apiPost(
       '/api/mobile/checkin',
@@ -100,6 +128,7 @@ async function callApi(action: PendingAction, signal: AbortSignal): Promise<void
         observation: action.observation,
       },
       signal,
+      idempotencyHeaders,
     )
   } else if (action.type === 'revert-checkin') {
     await apiPost(
@@ -110,6 +139,7 @@ async function callApi(action: PendingAction, signal: AbortSignal): Promise<void
         instanceIndex: action.instanceIndex,
       },
       signal,
+      idempotencyHeaders,
     )
   } else if (action.type === 'withdrawal') {
     await apiPost(
@@ -120,8 +150,10 @@ async function callApi(action: PendingAction, signal: AbortSignal): Promise<void
         instanceIndex: action.instanceIndex,
         mode: 'withdrawal',
         allowNoStock: action.allowNoStock,
+        allowNoStockReason: action.allowNoStockReason,
       },
       signal,
+      idempotencyHeaders,
     )
   } else if (action.type === 'revert-kit') {
     await apiPost(
@@ -132,11 +164,28 @@ async function callApi(action: PendingAction, signal: AbortSignal): Promise<void
         instanceIndex: action.instanceIndex,
       },
       signal,
+      idempotencyHeaders,
     )
   }
 }
 
 let netUnsub: (() => void) | null = null
+
+/**
+ * Timer de retry automático. Acionado quando há ações `failed` retentáveis
+ * com `nextRetryAt` no futuro. A cada tick (BACKOFF_TICK_MS) verifica se
+ * algum item venceu o backoff e tenta sincronizar. Auto-cancelado quando
+ * não há mais nada elegível, pra não drenar bateria à toa.
+ */
+const BACKOFF_TICK_MS = 5_000
+let autoRetryTimer: ReturnType<typeof setInterval> | null = null
+
+function stopAutoRetryTimer() {
+  if (autoRetryTimer) {
+    clearInterval(autoRetryTimer)
+    autoRetryTimer = null
+  }
+}
 
 /**
  * Promise singleton pra hydrate — garante que chamadas paralelas (ex: HMR,
@@ -179,6 +228,9 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
   hydrate: () => {
     if (hydratePromise) return hydratePromise
     hydratePromise = (async () => {
+      // One-shot migration de packets/queue antigos do AsyncStorage pra
+      // SQLite. Subsequentes boots fazem skip imediato via flag.
+      await migrateLegacyAsyncStorage()
       const [packets, queue] = await Promise.all([loadIndex(), loadQueue()])
       set({ packets, queue })
 
@@ -211,6 +263,9 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
         if (isOnline && prev === false && get().queue.length > 0) {
           setTimeout(() => void get().syncNow(), 1500)
         }
+        // Caiu offline → para o tick de auto-retry. NetInfo vai reativar via
+        // syncNow quando voltar online (a transition acima reagenda o timer).
+        if (!isOnline) stopAutoRetryTimer()
       })
     })()
     return hydratePromise
@@ -222,8 +277,14 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
   },
 
   retryAction: async (id) => {
-    // Reset attempts=0 pra voltar a ser elegível pelo auto-sync também.
-    await updateQueueItem(id, { status: 'pending', error: undefined, attempts: 0 })
+    // Reset attempts=0 + limpa nextRetryAt pra voltar elegível pelo auto-sync
+    // imediatamente (sem o reset, ficaria preso esperando o backoff vencer).
+    await updateQueueItem(id, {
+      status: 'pending',
+      error: undefined,
+      attempts: 0,
+      nextRetryAt: undefined,
+    })
     await get().refreshState()
     if (get().online !== false) await get().syncNow()
   },
@@ -247,11 +308,12 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
       emit({ step: 'participants', message: 'Baixando participantes...', percent: 5 })
 
       // Paginado. pageSize=500 cobre a maioria dos eventos em 1 request;
-      // loop só pra segurança em eventos gigantes. Máximo de 20 páginas (10k)
-      // pra não travar em loop infinito se o backend reportar total errado.
+      // loop com cap de 200 páginas (100k participantes) pra não travar em
+      // loop infinito caso o backend reporte total errado. Antes da migração
+      // pra SQLite o cap era 10k por causa do limite do AsyncStorage Android.
       const participants: MobileParticipant[] = []
       const pageSize = 500
-      for (let page = 0; page < 20; page++) {
+      for (let page = 0; page < 200; page++) {
         const res = await apiGet<ParticipantsPage>(
           `/api/mobile/events/${eventId}/participants?page=${page}&pageSize=${pageSize}`,
         )
@@ -314,6 +376,7 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
   wipeAll: async () => {
     // Sinaliza pro syncNow em andamento que deve abortar (ele verifica no loop).
     syncRunning = false
+    stopAutoRetryTimer()
     await Promise.all([wipePackets(), clearQueue()])
     set({ packets: [], queue: [], lastSync: null, syncing: false })
   },
@@ -333,8 +396,12 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
     // reabrir o app — e syncNow recusava rodar de novo.
     try {
       const queue = await loadQueue()
+      const nowMs = Date.now()
       const pending = queue.filter(
-        (q) => q.status !== 'synced' && q.attempts < MAX_AUTO_ATTEMPTS,
+        (q) =>
+          q.status !== 'synced' &&
+          q.attempts < MAX_AUTO_ATTEMPTS &&
+          isReadyForRetry(q, nowMs),
       )
       if (pending.length === 0) {
         set({ queue })
@@ -401,8 +468,15 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
           }
 
           // Outros erros (rede, timeout, 5xx) → marca failed, elegível pra retry.
+          // Backoff exponencial com jitter pra evitar thundering herd quando
+          // múltiplos scanners voltam online juntos. nextRetryAt é checado pelo
+          // filter de pending no próximo syncNow.
           const msg = humanizeError(err)
-          await updateQueueItem(action.id, { status: 'failed', error: msg }).catch(() => {})
+          await updateQueueItem(action.id, {
+            status: 'failed',
+            error: msg,
+            nextRetryAt: computeNextRetryAt(action.attempts + 1),
+          }).catch(() => {})
           failed++
         }
       }
@@ -414,6 +488,33 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
         queue: next,
         lastSync: { at: new Date().toISOString(), synced, failed },
       })
+      // Decide se mantém ou para o auto-retry timer:
+      // - Se há ação retryable com nextRetryAt no futuro, mantém o tick.
+      // - Caso contrário, para pra não drenar bateria sem necessidade.
+      const hasPendingRetry = next.some(
+        (q) =>
+          q.status === 'failed' &&
+          q.attempts < MAX_AUTO_ATTEMPTS &&
+          q.nextRetryAt !== undefined,
+      )
+      if (hasPendingRetry && get().online !== false) {
+        if (!autoRetryTimer) {
+          autoRetryTimer = setInterval(() => {
+            // Só dispara se há item realmente pronto e estamos online.
+            const s = useOfflineStore.getState()
+            if (s.online === false) return
+            const ready = s.queue.some(
+              (q) =>
+                q.status === 'failed' &&
+                q.attempts < MAX_AUTO_ATTEMPTS &&
+                isReadyForRetry(q, Date.now()),
+            )
+            if (ready) void s.syncNow()
+          }, BACKOFF_TICK_MS)
+        }
+      } else {
+        stopAutoRetryTimer()
+      }
     }
 
     return { synced, failed }
@@ -435,5 +536,3 @@ export function getPacketMeta(eventId: string): PacketMeta | undefined {
   return useOfflineStore.getState().packets.find((p) => p.eventId === eventId)
 }
 
-/** Carrega o packet do disco — usado pelos hooks quando offline. */
-export { loadPacket } from '@/services/offline'

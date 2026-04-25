@@ -9,6 +9,8 @@ interface WithdrawalPayload {
   eventId: string
   instanceIndex?: number
   allowNoStock?: boolean
+  /** Justificativa exigida pelo servidor (FORCE_REASON_REQUIRED) quando allowNoStock=true. */
+  allowNoStockReason?: string
 }
 
 interface WithdrawalResponse {
@@ -59,6 +61,7 @@ export function useKitWithdrawal() {
           participantId: data.participantId,
           instanceIndex: data.instanceIndex,
           allowNoStock: data.allowNoStock,
+          allowNoStockReason: data.allowNoStockReason,
         })
         patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
           kitWithdrawnAt: new Date().toISOString(),

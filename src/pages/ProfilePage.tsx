@@ -15,6 +15,9 @@ import { useNavigationStore } from '@/stores/navigationStore'
 import { useOfflineStore } from '@/stores/offlineStore'
 import { useUserStore } from '@/stores/userStore'
 import { Icon } from '@/components/Icon'
+import { StorageWarningModal } from '@/components/StorageWarningModal'
+import { apiGet } from '@/services/api'
+import { checkStorageForDownload, type StorageStatus } from '@/services/storage'
 
 const APP_VERSION = (Constants.expoConfig?.version as string | undefined) || '1.0.0'
 
@@ -52,6 +55,11 @@ export function ProfilePage() {
   const [checking, setChecking] = useState(false)
   const [updateReady, setUpdateReady] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
+  // Storage pre-check antes de baixar evento. null = modal fechado.
+  const [storageWarning, setStorageWarning] = useState<{
+    status: StorageStatus | null
+    loading: boolean
+  } | null>(null)
 
   const initials = user?.name
     ? user.name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() || '').join('')
@@ -96,6 +104,20 @@ export function ProfilePage() {
     }
   }
 
+  /** Executa o download de fato — chamado depois do pre-check de storage. */
+  async function executeDownload() {
+    if (!event) return
+    try {
+      await downloadEvent(event.id)
+      setStorageWarning(null)
+      Alert.alert('Pronto', 'Evento disponível offline. Scan + check-in + retirada funcionam sem net.')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setStorageWarning(null)
+      Alert.alert('Falha ao baixar', msg)
+    }
+  }
+
   async function handleDownload() {
     if (!event) {
       Alert.alert('Selecione um evento', 'Volte ao seletor de eventos e escolha um antes de baixar.')
@@ -105,12 +127,35 @@ export function ProfilePage() {
       Alert.alert('Sem internet', 'Conecte à internet pra baixar o evento.')
       return
     }
+
+    // Pre-check de storage: faz uma request leve pra estimar o tamanho do
+    // packet e compara com o espaço livre do device. Bloqueia se crítico,
+    // pede confirmação se apertado, segue direto se folgado.
+    setStorageWarning({ status: null, loading: true })
     try {
-      await downloadEvent(event.id)
-      Alert.alert('Pronto', 'Evento disponível offline. Scan + check-in + retirada funcionam sem net.')
+      type CountProbe = { total: number; participants: unknown[] }
+      const [pProbe, iProbe] = await Promise.all([
+        apiGet<CountProbe>(`/api/mobile/events/${event.id}/participants?page=0&pageSize=1`),
+        apiGet<CountProbe>(`/api/mobile/events/${event.id}/inventory?page=0&pageSize=1`).catch(
+          () => ({ total: 0, participants: [] }),
+        ),
+      ])
+      const status = await checkStorageForDownload(pProbe.total ?? 0, iProbe.total ?? 0)
+      // Folgado → fecha modal e baixa direto.
+      if (!status.insufficient && !status.critical) {
+        setStorageWarning(null)
+        await executeDownload()
+        return
+      }
+      // Apertado ou crítico → mostra modal pra operador decidir.
+      setStorageWarning({ status, loading: false })
     } catch (err) {
+      // Falha no probe (rede, servidor) — não bloqueia: deixa operador tentar
+      // o download normal, que vai falhar com mensagem própria se for o caso.
+      setStorageWarning(null)
       const msg = err instanceof Error ? err.message : String(err)
-      Alert.alert('Falha ao baixar', msg)
+      Alert.alert('Não consegui medir o espaço', `${msg}\n\nVou tentar baixar mesmo assim.`)
+      await executeDownload()
     }
   }
 
@@ -166,8 +211,15 @@ export function ProfilePage() {
             text: 'Sair mesmo assim',
             style: 'destructive',
             onPress: async () => {
-              await wipeAll()
-              await doLogout()
+              try {
+                await wipeAll()
+                await doLogout()
+              } catch {
+                // Falha ao limpar local: libera o flag pra operador tentar de
+                // novo. Sem isso, isLoggingOut ficaria true pra sempre se
+                // wipeAll/doLogout jogasse.
+                setIsLoggingOut(false)
+              }
             },
           },
         ],
@@ -183,6 +235,7 @@ export function ProfilePage() {
   }
 
   return (
+    <>
     <ScrollView
       contentContainerStyle={styles.scroll}
       showsVerticalScrollIndicator={false}
@@ -417,6 +470,16 @@ export function ProfilePage() {
         </View>
       </View>
     </ScrollView>
+    {storageWarning ? (
+      <StorageWarningModal
+        status={storageWarning.status}
+        loading={storageWarning.loading}
+        submitting={!!downloading}
+        onContinue={() => void executeDownload()}
+        onClose={() => setStorageWarning(null)}
+      />
+    ) : null}
+    </>
   )
 }
 
