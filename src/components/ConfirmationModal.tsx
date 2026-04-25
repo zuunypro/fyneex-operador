@@ -94,8 +94,11 @@ export function ConfirmationModal({
               <View style={styles.participantBody}>
                 <Text style={styles.participantName} numberOfLines={1}>{p.name}</Text>
                 <Text style={styles.participantMeta} numberOfLines={1}>
-                  {p.orderNumber} · {p.category}
+                  {p.orderNumber}
+                  {p.ticketName ? ` · ${p.ticketName}` : ''}
+                  {p.batch ? ` · ${p.batch}` : ''}
                   {p.instanceLabel ? ` · ${p.instanceLabel}` : ''}
+                  {p.buyerCpfLast5 ? ` · ····${p.buyerCpfLast5}` : ''}
                 </Text>
               </View>
             </View>

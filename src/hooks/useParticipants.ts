@@ -27,6 +27,8 @@ export interface MobileParticipant {
   instanceFields?: InstanceField[]
   buyerName?: string
   buyerEmail?: string
+  /** Últimos 5 dígitos do CPF do comprador (servidor nunca envia completo). */
+  buyerCpfLast5?: string
   hasKit?: boolean
   kitWithdrawnAt?: string | null
   /** true = nome veio do formulário pós-compra; false/undefined = fallback
@@ -86,9 +88,14 @@ export function useParticipants(eventId: string, options: UseParticipantsOptions
       )
     },
     enabled: !!eventId,
-    refetchInterval: online === false ? false : 15_000,
+    // Refetch background a cada 45s — antes era 15s, mas o pulso do "Ao Vivo"
+    // ficava agressivo demais (operador via bolinha piscando direto). Para
+    // mutations consistentes em tempo real, syncNow já invalida queries logo
+    // após drenar a fila offline. Eventos críticos: pull-to-refresh manual
+    // sempre disponível.
+    refetchInterval: online === false ? false : 45_000,
     refetchOnWindowFocus: online === false ? false : true,
-    staleTime: 5_000,
+    staleTime: 10_000,
     gcTime: 60_000,
   })
 }

@@ -202,6 +202,21 @@ let hydratePromise: Promise<void> | null = null
  */
 let syncRunning = false
 
+/**
+ * QueryClient ref pra invalidar queries de participants/inventory quando o
+ * sync drena ações com sucesso. Sem isso, operador precisava puxar pra baixo
+ * (pull-to-refresh) pra ver os items sincronizados refletidos como "feitos".
+ *
+ * Setado uma vez por App.tsx no boot via setSyncQueryClient().
+ */
+type MinimalQueryClient = {
+  invalidateQueries: (filters: { queryKey: unknown[] }) => void | Promise<void>
+}
+let syncQueryClient: MinimalQueryClient | null = null
+export function setSyncQueryClient(client: MinimalQueryClient): void {
+  syncQueryClient = client
+}
+
 interface ParticipantsPage {
   participants: MobileParticipant[]
   total: number
@@ -488,6 +503,16 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
         queue: next,
         lastSync: { at: new Date().toISOString(), synced, failed },
       })
+      // Se algo foi efetivamente sincronizado, invalida as queries afetadas
+      // pra que a lista de participantes/estoque atualize automaticamente —
+      // antes disso o operador precisava puxar pra baixo manualmente.
+      if (synced > 0 && syncQueryClient) {
+        try {
+          syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'participants'] })
+          syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'inventory'] })
+          syncQueryClient.invalidateQueries({ queryKey: ['mobile', 'stats'] })
+        } catch { /* invalidate é best-effort, não falha sync por causa disso */ }
+      }
       // Decide se mantém ou para o auto-retry timer:
       // - Se há ação retryable com nextRetryAt no futuro, mantém o tick.
       // - Caso contrário, para pra não drenar bateria sem necessidade.

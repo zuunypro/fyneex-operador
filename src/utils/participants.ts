@@ -57,15 +57,21 @@ export function groupByOrder(participants: MobileParticipant[]): GroupedParticip
   return { items, groupOf }
 }
 
-/** Case-insensitive; checks name, participantId, orderNumber e instance fields. */
+/** Case-insensitive. Cobre nome do participante, nome do comprador, número
+ *  do pedido, últimos 5 do CPF do comprador e campos do formulário. Mantido
+ *  em sync com `applyFilters` no servidor (`participants.tsx`) e com
+ *  `buildSearchText` em `services/offline.ts`. */
 export function matchParticipant(p: MobileParticipant, searchLower: string): boolean {
   if (!searchLower) return true
+  const sDigits = searchLower.replace(/\D/g, '')
   // Defesa em profundidade: o tipo garante string, mas packets antigos / sync
   // legado podem ter campos null e crashar `.toLowerCase()`.
   return (
     (p.name ?? '').toLowerCase().includes(searchLower) ||
+    (p.buyerName ?? '').toLowerCase().includes(searchLower) ||
     (p.participantId ?? '').toLowerCase().includes(searchLower) ||
     (p.orderNumber ?? '').toLowerCase().includes(searchLower) ||
+    (sDigits.length >= 3 && (p.buyerCpfLast5 ?? '').includes(sDigits)) ||
     (p.instanceFields?.some((f) => (f.value ?? '').toLowerCase().includes(searchLower)) ?? false)
   )
 }

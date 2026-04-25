@@ -110,12 +110,17 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
  * Concatena os campos buscáveis em uma string lowercase única, gravada na
  * coluna `search_text` pra busca via LIKE indexado. Mantido em sync com
  * `matchParticipant` em utils/participants.ts.
+ *
+ * Inclui buyerName e buyerCpfLast5 pra que operador no portão consiga buscar
+ * por "quem comprou" e pelos últimos dígitos do CPF que o cliente passa.
  */
 function buildSearchText(p: MobileParticipant): string {
   const parts = [
     p.name ?? '',
+    p.buyerName ?? '',
     p.participantId ?? '',
     p.orderNumber ?? '',
+    p.buyerCpfLast5 ?? '',
     ...(p.instanceFields?.map((f) => f.value ?? '') ?? []),
   ]
   return parts.join(' ').toLowerCase()

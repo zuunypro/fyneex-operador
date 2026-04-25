@@ -11,7 +11,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ApiError } from '@/services/api'
 import { colors } from '@/theme'
 import { useNavigationStore } from '@/stores/navigationStore'
-import { useOfflineStore } from '@/stores/offlineStore'
+import { setSyncQueryClient, useOfflineStore } from '@/stores/offlineStore'
 import { loadUserFromStorage, useUserStore } from '@/stores/userStore'
 import { LoginPage } from '@/pages/LoginPage'
 import { EventSelectorPage } from '@/pages/EventSelectorPage'
@@ -105,6 +105,13 @@ function AppRouter() {
       queryClient.invalidateQueries({ queryKey: ['mobile'] })
     }
   }, [online, queryClient])
+
+  // Injeta o queryClient no offlineStore pra que `syncNow` consiga invalidar
+  // queries de participants/inventory quando ações offline são drenadas. Sem
+  // isso o operador precisava puxar pra baixo manualmente pra ver o sync.
+  useEffect(() => {
+    setSyncQueryClient(queryClient)
+  }, [queryClient])
 
   useEffect(() => {
     let alive = true

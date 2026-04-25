@@ -664,7 +664,11 @@ const KitRow = memo(function KitRow({
             ) : null}
           </View>
           <Text style={styles.rowMetaText} numberOfLines={1}>
-            {group ? `${group.pos}/${group.total} · ` : ''}{p.orderNumber} · {p.category}
+            {group ? `${group.pos}/${group.total} · ` : ''}
+            {p.orderNumber}
+            {p.ticketName ? ` · ${p.ticketName}` : ''}
+            {p.batch ? ` · ${p.batch}` : ''}
+            {p.buyerCpfLast5 ? ` · CPF ····${p.buyerCpfLast5}` : ''}
           </Text>
         </View>
 

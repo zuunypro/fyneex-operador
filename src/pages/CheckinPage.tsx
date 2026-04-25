@@ -537,7 +537,11 @@ const ParticipantRow = memo(function ParticipantRow({
           </View>
           <View style={styles.rowMeta}>
             <Text style={styles.rowMetaText} numberOfLines={1}>
-              {group ? `${group.pos}/${group.total} · ` : ''}{p.orderNumber} · {p.category}
+              {group ? `${group.pos}/${group.total} · ` : ''}
+              {p.orderNumber}
+              {p.ticketName ? ` · ${p.ticketName}` : ''}
+              {p.batch ? ` · ${p.batch}` : ''}
+              {p.buyerCpfLast5 ? ` · CPF ····${p.buyerCpfLast5}` : ''}
             </Text>
             <Icon
               name="expand_more"
@@ -583,7 +587,9 @@ const ParticipantRow = memo(function ParticipantRow({
               <DetailField label="Pedido" value={p.orderNumber || '—'} />
               <DetailField label="Ingresso" value={p.ticketName || '—'} />
               {p.batch ? <DetailField label="Lote" value={p.batch} /> : null}
-              <DetailField label="Categoria" value={p.category || '—'} />
+              {p.buyerCpfLast5 ? (
+                <DetailField label="CPF (final)" value={`····${p.buyerCpfLast5}`} />
+              ) : null}
             </View>
           </View>
 
