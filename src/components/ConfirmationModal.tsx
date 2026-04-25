@@ -107,7 +107,7 @@ export function ConfirmationModal({
               <View style={styles.formPendingBox}>
                 <Icon name="priority_high" size={14} color={colors.accentOrange} />
                 <Text style={styles.formPendingText}>
-                  Este participante ainda não preencheu o formulário do evento. O nome mostrado é do comprador.
+                  Este participante ainda não preencheu o formulário do evento. Confirme a identidade pelo CPF do comprador ou número do pedido.
                 </Text>
               </View>
             ) : null}

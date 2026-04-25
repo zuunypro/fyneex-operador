@@ -531,7 +531,7 @@ const ParticipantRow = memo(function ParticipantRow({
             ) : null}
             {p.nameFromForm === false ? (
               <View style={styles.buyerFallbackBadge}>
-                <Text style={styles.buyerFallbackLabel}>comprador</Text>
+                <Text style={styles.buyerFallbackLabel}>form pendente</Text>
               </View>
             ) : null}
           </View>
@@ -603,7 +603,7 @@ const ParticipantRow = memo(function ParticipantRow({
                 <View style={styles.noFormBlock}>
                   <Icon name="priority_high" size={14} color={colors.accentOrange} />
                   <Text style={styles.noFormText}>
-                    Participante ainda não preencheu o formulário do evento. O nome acima é do comprador.
+                    Participante ainda não preencheu o formulário do evento. Confirme a identidade pelo CPF do comprador (no detalhe abaixo) ou pelo número do pedido.
                   </Text>
                 </View>
               )
