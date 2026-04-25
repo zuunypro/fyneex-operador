@@ -64,11 +64,27 @@ export function groupByOrder(participants: MobileParticipant[]): GroupedParticip
  *  (`participants.tsx`) e com `buildSearchText` em `services/offline.ts`.
  *
  *  Aceita o input cru do TextInput (`searchRaw`) — normaliza internamente
- *  pra remover acentos. "João" digitado como "joao" agora bate. */
+ *  pra remover acentos. "João" digitado como "joao" agora bate.
+ *
+ *  PERF: normaliza a query 1× por participante; pra listas grandes (30k+)
+ *  prefira `matchParticipantNormalized` com `s`/`sDigits` pré-computados
+ *  (evita 30k× redundância dentro do `filter`). */
 export function matchParticipant(p: MobileParticipant, searchRaw: string): boolean {
   const s = normalizeForSearch(searchRaw)
   if (!s) return true
   const sDigits = searchRaw.replace(/\D/g, '')
+  return matchParticipantNormalized(p, s, sDigits)
+}
+
+/** Hot-path: aceita query já normalizada (`s` em lowercase sem acentos) e
+ *  os dígitos extraídos (`sDigits`). Usado dentro de `participants.filter`
+ *  pra evitar 30k× `normalize('NFD')` redundante na string de busca. */
+export function matchParticipantNormalized(
+  p: MobileParticipant,
+  s: string,
+  sDigits: string,
+): boolean {
+  if (!s) return true
   // Defesa em profundidade: o tipo garante string, mas packets antigos / sync
   // legado podem ter campos null e crashar `.toLowerCase()`.
   return (
@@ -79,4 +95,50 @@ export function matchParticipant(p: MobileParticipant, searchRaw: string): boole
     (sDigits.length >= 3 && (p.buyerCpfLast5 ?? '').includes(sDigits)) ||
     (p.instanceFields?.some((f) => normalizeForSearch(f.value ?? '').includes(s)) ?? false)
   )
+}
+
+/** Pre-build de searchText por participante.
+ *
+ *  Concatena nome+comprador+pedido+ID+formFields num único string
+ *  já normalizado (lowercase sem acentos). Em `filter()` o match
+ *  passa a ser 1× `String.includes` em vez de 5+× `normalize` por
+ *  participante por keystroke — em listas de 30k, a diferença é
+ *  ~150ms vs ~5ms por keystroke pós-debounce.
+ *
+ *  Build: chamado 1× por refetch dos participantes (45s interval).
+ *  Custa ~120ms pra 30k em device midrange — gasto durante idle,
+ *  não bloqueia digitação. */
+export function buildSearchIndex(
+  participants: MobileParticipant[],
+): Map<string, string> {
+  const index = new Map<string, string>()
+  for (const p of participants) {
+    const parts: string[] = []
+    if (p.name) parts.push(p.name)
+    if (p.buyerName) parts.push(p.buyerName)
+    if (p.participantId) parts.push(p.participantId)
+    if (p.orderNumber) parts.push(p.orderNumber)
+    if (p.instanceFields) {
+      for (const f of p.instanceFields) {
+        if (f.value) parts.push(f.value)
+      }
+    }
+    index.set(p.id, normalizeForSearch(parts.join(' ')))
+  }
+  return index
+}
+
+/** Variante super-rápida: usa o índice pré-computado (1× normalize) +
+ *  short-circuit por dígitos do CPF (não normaliza). Substitui
+ *  `matchParticipantNormalized` no caminho quente. */
+export function matchByIndex(
+  p: MobileParticipant,
+  searchText: string,
+  s: string,
+  sDigits: string,
+): boolean {
+  if (!s) return true
+  if (searchText.includes(s)) return true
+  if (sDigits.length >= 3 && (p.buyerCpfLast5 ?? '').includes(sDigits)) return true
+  return false
 }

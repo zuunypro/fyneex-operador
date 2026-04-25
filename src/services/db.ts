@@ -86,6 +86,12 @@ async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {
   }
   // Foreign keys precisam ser habilitadas em cada conexão.
   await db.execAsync('PRAGMA foreign_keys = ON;')
+  // WAL = leitores não bloqueiam escritor (insert de 30k participants
+  // não trava queries de read concorrentes). NORMAL = não fsync por
+  // commit (safe com WAL); ~2× mais rápido em writes que o FULL default.
+  // Persistente por DB — só roda na 1ª abertura mas é idempotente.
+  await db.execAsync('PRAGMA journal_mode = WAL;')
+  await db.execAsync('PRAGMA synchronous = NORMAL;')
 }
 
 /** Singleton da DB. Inicializa schema na primeira chamada. */

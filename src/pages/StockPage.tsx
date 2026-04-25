@@ -1,7 +1,6 @@
 import { memo, useCallback, useMemo, useState } from 'react'
 import {
   ActivityIndicator,
-  FlatList,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -9,6 +8,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
+import { FlashList } from '@shopify/flash-list'
 import { colors, font, radius } from '@/theme'
 import { ApiError } from '@/services/api'
 import { friendlyError } from '@/utils/errorMessages'
@@ -18,7 +18,9 @@ import { useKitWithdrawal } from '@/hooks/useKitWithdrawal'
 import { useRevertKit } from '@/hooks/useRevertKit'
 import { useInventory } from '@/hooks/useInventory'
 import { useToast } from '@/hooks/useToast'
-import { groupByOrder, matchParticipant, type GroupInfo } from '@/utils/participants'
+import { buildSearchIndex, groupByOrder, matchByIndex, type GroupInfo } from '@/utils/participants'
+import { normalizeForSearch } from '@/utils/text'
+import { formatCpfLast5 } from '@/utils/format'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { StalePacketWarning } from '@/components/StalePacketWarning'
 import { feedbackBad, feedbackOk } from '@/utils/feedback'
@@ -85,15 +87,26 @@ export function StockPage() {
   // Debounce 250ms — sem isso cada keystroke filtrava 30k+ participantes.
   // matchParticipant normaliza acentos internamente, então passa o cru.
   const debouncedSearch = useDebouncedValue(search, 250)
+
+  // PERF: índice de busca pré-normalizado por participante. Construído
+  // 1× por refetch (45s) — keystrokes só fazem `String.includes`,
+  // sem `normalize('NFD')` repetido em 30k linhas.
+  const searchIndex = useMemo(() => buildSearchIndex(participants), [participants])
+
   const filtered = useMemo(() => {
+    const s = normalizeForSearch(debouncedSearch)
+    const sDigits = debouncedSearch.replace(/\D/g, '')
     return participants.filter((p) => {
-      if (!matchParticipant(p, debouncedSearch)) return false
+      if (s) {
+        const idx = searchIndex.get(p.id) ?? ''
+        if (!matchByIndex(p, idx, s, sDigits)) return false
+      }
       const done = isDelivered(p)
       if (filter === 'all') return true
       if (filter === 'pending') return !done
       return done
     })
-  }, [participants, debouncedSearch, filter, isDelivered])
+  }, [participants, debouncedSearch, filter, isDelivered, searchIndex])
 
   const counts = useMemo(() => {
     let deliveredCount = 0
@@ -465,11 +478,13 @@ export function StockPage() {
           </Pressable>
         </View>
       ) : (
-        <FlatList
+        <View style={styles.list}>
+        <FlashList
           data={grouped.items}
           keyExtractor={(p) => p.id}
-          style={styles.list}
           contentContainerStyle={styles.listContent}
+          estimatedItemSize={84}
+          drawDistance={500}
           renderItem={({ item }) => (
             <KitRow
               participant={item}
@@ -507,10 +522,8 @@ export function StockPage() {
               colors={[colors.accentGreen]}
             />
           }
-          initialNumToRender={15}
-          maxToRenderPerBatch={20}
-          windowSize={7}
         />
+        </View>
       )}
 
       <View style={styles.fabWrap} pointerEvents="box-none">
@@ -679,7 +692,7 @@ const KitRow = memo(function KitRow({
             {p.orderNumber}
             {p.ticketName ? ` · ${p.ticketName}` : ''}
             {p.batch ? ` · ${p.batch}` : ''}
-            {p.buyerCpfLast5 ? ` · CPF ····${p.buyerCpfLast5}` : ' · sem CPF'}
+            {p.buyerCpfLast5 ? ` · CPF ${formatCpfLast5(p.buyerCpfLast5)}` : ' · sem CPF'}
           </Text>
         </View>
 

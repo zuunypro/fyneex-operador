@@ -1,7 +1,6 @@
 import { memo, useCallback, useMemo, useState } from 'react'
 import {
   ActivityIndicator,
-  FlatList,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -9,6 +8,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
+import { FlashList } from '@shopify/flash-list'
 import { colors, font, radius } from '@/theme'
 import { ApiError } from '@/services/api'
 import { friendlyError } from '@/utils/errorMessages'
@@ -18,7 +18,9 @@ import { useCheckin } from '@/hooks/useCheckin'
 import { useRevertCheckin } from '@/hooks/useRevertCheckin'
 import { useRecentObservations } from '@/hooks/useRecentObservations'
 import { useToast } from '@/hooks/useToast'
-import { groupByOrder, matchParticipant, type GroupInfo } from '@/utils/participants'
+import { buildSearchIndex, groupByOrder, matchByIndex, type GroupInfo } from '@/utils/participants'
+import { normalizeForSearch } from '@/utils/text'
+import { formatCpfLast5, formatPhoneBR } from '@/utils/format'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { StalePacketWarning } from '@/components/StalePacketWarning'
 import { feedbackBad, feedbackOk } from '@/utils/feedback'
@@ -70,20 +72,35 @@ export function CheckinPage() {
   // a sensação de teclado "preso". matchParticipant já normaliza acentos
   // internamente, então passamos o termo cru aqui.
   const debouncedSearch = useDebouncedValue(search, 250)
+
+  // PERF: índice de busca pré-normalizado por participante. Construído
+  // 1× por refetch (45s) — keystrokes só fazem `String.includes`,
+  // sem `normalize('NFD')` repetido em 30k linhas.
+  const searchIndex = useMemo(() => buildSearchIndex(participants), [participants])
+
   const filtered = useMemo(() => {
+    const s = normalizeForSearch(debouncedSearch)
+    const sDigits = debouncedSearch.replace(/\D/g, '')
     return participants.filter((p) => {
-      if (!matchParticipant(p, debouncedSearch)) return false
+      if (s) {
+        const idx = searchIndex.get(p.id) ?? ''
+        if (!matchByIndex(p, idx, s, sDigits)) return false
+      }
       if (filter === 'all') return true
       if (filter === 'pending') return p.status === 'pending'
       return p.status === 'checked'
     })
-  }, [participants, debouncedSearch, filter])
+  }, [participants, debouncedSearch, filter, searchIndex])
 
-  const counts = useMemo(() => ({
-    all: participants.length,
-    pending: participants.filter((p) => p.status === 'pending').length,
-    checked: participants.filter((p) => p.status === 'checked').length,
-  }), [participants])
+  const counts = useMemo(() => {
+    let pending = 0
+    let checked = 0
+    for (const p of participants) {
+      if (p.status === 'pending') pending++
+      else if (p.status === 'checked') checked++
+    }
+    return { all: participants.length, pending, checked }
+  }, [participants])
 
   const grouped = useMemo(() => groupByOrder(filtered), [filtered])
 
@@ -343,11 +360,13 @@ export function CheckinPage() {
           </Pressable>
         </View>
       ) : (
-        <FlatList
+        <View style={styles.list}>
+        <FlashList
           data={grouped.items}
           keyExtractor={(p) => p.id}
-          style={styles.list}
           contentContainerStyle={styles.listContent}
+          estimatedItemSize={84}
+          drawDistance={500}
           renderItem={({ item }) => (
             <ParticipantRow
               participant={item}
@@ -382,10 +401,8 @@ export function CheckinPage() {
               colors={[colors.accentGreen]}
             />
           }
-          initialNumToRender={15}
-          maxToRenderPerBatch={20}
-          windowSize={7}
         />
+        </View>
       )}
 
       <View style={styles.fabWrap} pointerEvents="box-none">
@@ -558,7 +575,7 @@ const ParticipantRow = memo(function ParticipantRow({
               {p.orderNumber}
               {p.ticketName ? ` · ${p.ticketName}` : ''}
               {p.batch ? ` · ${p.batch}` : ''}
-              {p.buyerCpfLast5 ? ` · CPF ····${p.buyerCpfLast5}` : ' · sem CPF'}
+              {p.buyerCpfLast5 ? ` · CPF ${formatCpfLast5(p.buyerCpfLast5)}` : ' · sem CPF'}
             </Text>
             <Icon
               name="expand_more"
@@ -595,10 +612,10 @@ const ParticipantRow = memo(function ParticipantRow({
             <View style={styles.detailGrid}>
               <DetailField label="Nome" value={p.buyerName || '—'} />
               <DetailField label="Email" value={p.buyerEmail || p.email || '—'} />
-              <DetailField label="Telefone" value={p.buyerPhone || '—'} />
+              <DetailField label="Telefone" value={formatPhoneBR(p.buyerPhone)} />
               <DetailField
                 label="CPF (final)"
-                value={p.buyerCpfLast5 ? `····${p.buyerCpfLast5}` : '—'}
+                value={formatCpfLast5(p.buyerCpfLast5)}
               />
             </View>
           </View>

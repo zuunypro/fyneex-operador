@@ -11,6 +11,7 @@ import {
 } from 'react-native'
 import { colors, font, radius } from '@/theme'
 import type { MobileParticipant } from '@/hooks/useParticipants'
+import { formatCpfLast5 } from '@/utils/format'
 import { Icon } from './Icon'
 
 interface ConfirmationModalProps {
@@ -103,7 +104,7 @@ export function ConfirmationModal({
                   {p.ticketName ? ` · ${p.ticketName}` : ''}
                   {p.batch ? ` · ${p.batch}` : ''}
                   {p.instanceLabel ? ` · ${p.instanceLabel}` : ''}
-                  {p.buyerCpfLast5 ? ` · ····${p.buyerCpfLast5}` : ' · sem CPF'}
+                  {p.buyerCpfLast5 ? ` · ${formatCpfLast5(p.buyerCpfLast5)}` : ' · sem CPF'}
                 </Text>
               </View>
             </View>

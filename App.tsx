@@ -5,7 +5,10 @@ import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import * as SystemUI from 'expo-system-ui'
 import * as Updates from 'expo-updates'
-import { QueryClient, QueryClientProvider, focusManager, useQueryClient } from '@tanstack/react-query'
+import { QueryClient, focusManager, useQueryClient } from '@tanstack/react-query'
+import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
+import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { AppShell } from '@/components/AppShell'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ApiError } from '@/services/api'
@@ -30,6 +33,19 @@ const queryClient = new QueryClient({
       retry: 1,
     },
   },
+})
+
+// Persiste apenas queries leves (lista de eventos) no AsyncStorage. Boot
+// fica instantâneo no `EventSelectorPage` mesmo sem internet, em vez de
+// mostrar spinner enquanto refetch corre. Não persiste:
+//   - `mobile.participants`: já está no SQLite (`offline.ts`), duplicaria
+//     30k linhas no AsyncStorage e estouraria o cap de 6MB.
+//   - `mobile.inventory`/`mobile.stats`: refetcham toda hora, cache vence
+//     antes de ser útil.
+const queryPersister = createAsyncStoragePersister({
+  storage: AsyncStorage,
+  key: 'fyneex-query-cache',
+  throttleTime: 1000,
 })
 
 AppState.addEventListener('change', (status: AppStateStatus) => {
@@ -160,10 +176,23 @@ export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.bgBase }}>
       <SafeAreaProvider>
-        <QueryClientProvider client={queryClient}>
+        <PersistQueryClientProvider
+          client={queryClient}
+          persistOptions={{
+            persister: queryPersister,
+            maxAge: 24 * 60 * 60 * 1000,
+            dehydrateOptions: {
+              shouldDehydrateQuery: (query) => {
+                if (query.state.status !== 'success') return false
+                const key = query.queryKey
+                return Array.isArray(key) && key[0] === 'mobile' && key[1] === 'events'
+              },
+            },
+          }}
+        >
           <StatusBar style="light" backgroundColor={colors.bgBase} />
           <AppRouter />
-        </QueryClientProvider>
+        </PersistQueryClientProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   )
