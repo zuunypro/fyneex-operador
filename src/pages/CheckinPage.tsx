@@ -20,6 +20,8 @@ import { useRecentObservations } from '@/hooks/useRecentObservations'
 import { useToast } from '@/hooks/useToast'
 import { buildSearchIndex, groupByOrder, matchByIndex, type GroupInfo } from '@/utils/participants'
 import { normalizeForSearch } from '@/utils/text'
+import { classifyFields } from '@/utils/fieldClassification'
+import { DetailField } from '@/components/DetailField'
 import { formatCpfLast5, formatPhoneBR } from '@/utils/format'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { StalePacketWarning } from '@/components/StalePacketWarning'
@@ -513,6 +515,8 @@ const ParticipantRow = memo(function ParticipantRow({
   const isChecked = p.status === 'checked'
   const [expanded, setExpanded] = useState(false)
   const observation = p.observation
+  const buyerDifferent =
+    p.buyerName && p.buyerName !== 'N/A' && p.buyerName !== p.name
 
   return (
     <View style={[styles.row, isPending && { opacity: 0.7 }]}>
@@ -605,51 +609,54 @@ const ParticipantRow = memo(function ParticipantRow({
 
       {expanded ? (
         <View style={styles.details}>
+          {/* ❶ CONFERIR IDENTIDADE — primeira coisa que o operador olha
+                pra liberar o check-in. CPF, pedido, comprador (se diferente
+                do participante), posição em pedido múltiplo. */}
           <View>
-            <Text style={styles.detailSectionLabel}>Comprador</Text>
-            {/* 4 dados sempre visíveis (Nome, Email, Telefone, CPF) — usar
-                "—" quando ausente pra operador entender que é gap, não bug. */}
+            <Text style={styles.detailSectionLabelPrimary}>
+              Conferir identidade
+            </Text>
             <View style={styles.detailGrid}>
-              <DetailField label="Nome" value={p.buyerName || '—'} />
-              <DetailField label="Email" value={p.buyerEmail || p.email || '—'} />
-              <DetailField label="Telefone" value={formatPhoneBR(p.buyerPhone)} />
               <DetailField
                 label="CPF (final)"
                 value={formatCpfLast5(p.buyerCpfLast5)}
               />
-            </View>
-          </View>
-
-          <View>
-            <Text style={styles.detailSectionLabel}>Compra</Text>
-            <View style={styles.detailGrid}>
               <DetailField label="Pedido" value={p.orderNumber || '—'} />
-              <DetailField label="Ingresso" value={p.ticketName || '—'} />
-              {p.batch ? <DetailField label="Lote" value={p.batch} /> : null}
+              {buyerDifferent ? (
+                <DetailField label="Comprador" value={p.buyerName!} />
+              ) : null}
+              {p.instanceIndex && p.instanceTotal && p.instanceTotal > 1 ? (
+                <DetailField
+                  label="Posição"
+                  value={`${p.instanceIndex} de ${p.instanceTotal}`}
+                />
+              ) : null}
             </View>
           </View>
 
+          {/* ❷ DADOS DO PARTICIPANTE — alergias, contato emergência, tipo
+                sanguíneo, etc. Importa pra organizador (segurança) mas
+                quase sempre o check-in é só conferir e liberar. */}
           {(() => {
-            const extraFields = (p.instanceFields || []).filter(
-              (f) => !f.label.toLowerCase().includes('nome'),
-            )
-            const formUnfilled = p.nameFromForm === false && extraFields.length === 0
+            const all = p.instanceFields || []
+            const { other } = classifyFields(all)
+            const formUnfilled = p.nameFromForm === false && all.length === 0
             if (formUnfilled) {
               return (
                 <View style={styles.noFormBlock}>
                   <Icon name="priority_high" size={14} color={colors.accentOrange} />
                   <Text style={styles.noFormText}>
-                    Participante ainda não preencheu o formulário do evento. Confirme a identidade pelo CPF do comprador (no detalhe abaixo) ou pelo número do pedido.
+                    Participante não preencheu o formulário. Confirme pelo CPF/pedido acima e libere o check-in.
                   </Text>
                 </View>
               )
             }
-            if (extraFields.length === 0) return null
+            if (other.length === 0) return null
             return (
               <View>
                 <Text style={styles.detailSectionLabel}>Dados do participante</Text>
                 <View style={styles.detailGrid}>
-                  {extraFields.map((f) => (
+                  {other.map((f) => (
                     <DetailField key={f.label} label={f.label} value={f.value} />
                   ))}
                 </View>
@@ -657,20 +664,27 @@ const ParticipantRow = memo(function ParticipantRow({
             )
           })()}
 
-          {isChecked ? (
-            <View style={styles.obsBlock}>
-              <Text style={styles.detailSectionLabel}>Observação</Text>
+          {/* ❸ STATUS + observação — entregue/pendente, com nota se houver. */}
+          <View>
+            <Text style={styles.detailSectionLabel}>Status</Text>
+            {isChecked ? (
+              <Text style={styles.statusOkText}>✓ Check-in feito</Text>
+            ) : (
+              <Text style={styles.statusPendingText}>● Pendente</Text>
+            )}
+            {isChecked ? (
               <Text
                 style={[
                   styles.obsText,
-                  { color: observation ? '#B0B0B0' : '#444444' },
+                  { color: observation ? '#B0B0B0' : '#444444', marginTop: 4 },
                 ]}
               >
-                {observation || 'Nenhuma observação registrada.'}
+                {observation || 'Sem observação.'}
               </Text>
-            </View>
-          ) : null}
+            ) : null}
+          </View>
 
+          {/* ❹ AÇÕES — Reverter check-in (sutil, só se já feito). */}
           {isChecked ? (
             <Pressable
               onPress={onRevert}
@@ -687,20 +701,34 @@ const ParticipantRow = memo(function ParticipantRow({
               </Text>
             </Pressable>
           ) : null}
+
+          {/* ❺ Contato (compacto, no fim) — só pra exceção (ligar pro
+                comprador se a pessoa não chegou, etc.). */}
+          {(p.buyerEmail || p.email || p.buyerPhone || p.ticketName) ? (
+            <View style={styles.contactStrip}>
+              {p.ticketName ? (
+                <Text style={styles.contactStripText} numberOfLines={1}>
+                  🎫 {p.ticketName}
+                  {p.batch ? ` · ${p.batch}` : ''}
+                </Text>
+              ) : null}
+              {p.buyerEmail || p.email ? (
+                <Text style={styles.contactStripText} numberOfLines={1}>
+                  ✉ {p.buyerEmail || p.email}
+                </Text>
+              ) : null}
+              {p.buyerPhone ? (
+                <Text style={styles.contactStripText} numberOfLines={1}>
+                  ☏ {formatPhoneBR(p.buyerPhone)}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       ) : null}
     </View>
   )
 })
-
-function DetailField({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.detailField}>
-      <Text style={styles.detailFieldLabel}>{label}</Text>
-      <Text style={styles.detailFieldValue} numberOfLines={1}>{value}</Text>
-    </View>
-  )
-}
 
 function formatCheckedInAt(iso: string | null | undefined): string | undefined {
   if (!iso) return 'Check-in já registrado para este ingresso.'
@@ -1066,6 +1094,37 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     marginBottom: 4,
   },
+  detailSectionLabelPrimary: {
+    fontSize: 11,
+    fontWeight: font.weight.extrabold,
+    color: colors.accentGreen,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  statusOkText: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.accentGreen,
+  },
+  statusPendingText: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.accentOrange,
+  },
+  contactStrip: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#222222',
+  },
+  contactStripText: {
+    fontSize: 10,
+    fontWeight: font.weight.medium,
+    color: colors.textTertiary,
+  },
   detailBuyer: {
     fontSize: 12,
     fontWeight: font.weight.bold,
@@ -1080,23 +1139,6 @@ const styles = StyleSheet.create({
   detailGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-  },
-  detailField: {
-    width: '50%',
-    paddingRight: 10,
-    paddingBottom: 6,
-  },
-  detailFieldLabel: {
-    fontSize: 9,
-    fontWeight: font.weight.bold,
-    color: colors.textTertiary,
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  detailFieldValue: {
-    fontSize: 11,
-    fontWeight: font.weight.semibold,
-    color: '#B0B0B0',
   },
   obsBlock: {
     paddingTop: 8,

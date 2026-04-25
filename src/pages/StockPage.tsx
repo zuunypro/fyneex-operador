@@ -20,7 +20,9 @@ import { useInventory } from '@/hooks/useInventory'
 import { useToast } from '@/hooks/useToast'
 import { buildSearchIndex, groupByOrder, matchByIndex, type GroupInfo } from '@/utils/participants'
 import { normalizeForSearch } from '@/utils/text'
+import { isKitFieldLabel } from '@/utils/fieldClassification'
 import { formatCpfLast5, formatPhoneBR } from '@/utils/format'
+import { DetailField } from '@/components/DetailField'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { StalePacketWarning } from '@/components/StalePacketWarning'
 import { feedbackBad, feedbackOk } from '@/utils/feedback'
@@ -689,23 +691,9 @@ const KitRow = memo(function KitRow({
   const kitItems = useMemo(() => {
     const fields = p.instanceFields || []
     const ticketLower = (p.ticketName || '').toLowerCase().trim()
-    const isKit = (label: string) => {
-      const l = label.toLowerCase()
-      return (
-        l.includes('camiseta') ||
-        l.includes('camisa') ||
-        l.includes('medalha') ||
-        l.includes('garrafa') ||
-        l.includes('troféu') ||
-        l.includes('trofeu') ||
-        l.includes('brinde') ||
-        l.includes('kit') ||
-        l.includes('tamanho')
-      )
-    }
     const list: Array<{ label: string; value: string; stock: StockInfo | null }> = []
     for (const f of fields) {
-      if (!isKit(f.label)) continue
+      if (!isKitFieldLabel(f.label)) continue
       const stockKey = `${ticketLower} - ${f.label.toLowerCase().trim()}`
       const stock = stockByCategory.get(stockKey) ?? null
       list.push({ label: f.label, value: f.value, stock })
@@ -961,15 +949,6 @@ const KitRow = memo(function KitRow({
     </View>
   )
 })
-
-function DetailField({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.detailField}>
-      <Text style={styles.detailFieldLabel}>{label}</Text>
-      <Text style={styles.detailFieldValue} numberOfLines={1}>{value}</Text>
-    </View>
-  )
-}
 
 function formatWithdrawnAt(iso: string | null | undefined): string | undefined {
   if (!iso) return 'Kit já retirado para este ingresso.'
@@ -1432,23 +1411,6 @@ const styles = StyleSheet.create({
   detailGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-  },
-  detailField: {
-    width: '50%',
-    paddingRight: 10,
-    paddingBottom: 6,
-  },
-  detailFieldLabel: {
-    fontSize: 9,
-    fontWeight: font.weight.bold,
-    color: colors.textTertiary,
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  detailFieldValue: {
-    fontSize: 11,
-    fontWeight: font.weight.semibold,
-    color: '#B0B0B0',
   },
   noFormBlock: {
     flexDirection: 'row',
