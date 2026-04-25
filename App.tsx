@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, AppState, type AppStateStatus, StyleSheet, View } from 'react-native'
+import { ActivityIndicator, Alert, AppState, type AppStateStatus, StyleSheet, View } from 'react-native'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
@@ -89,11 +89,36 @@ function AppRouter() {
   // efetivamente deslogado, exigindo navegação manual até Profile pra clicar
   // sair. O listener global cobre todos os hooks (`useCheckin`, `useKitWithdrawal`,
   // `useParticipants`, etc.) e dispara o mesmo `logout()` do navigationStore.
+  const offlineQueue = useOfflineStore((s) => s.queue)
   useEffect(() => {
     if (!isLoggedIn) return
     const handleAuthError = (err: unknown) => {
-      if (err instanceof ApiError && err.status === 401) {
+      if (!(err instanceof ApiError)) return
+
+      if (err.status === 401) {
+        // BUG 3 fix: antes de deslogar, avisa o operador se há ações offline
+        // pendentes que serão perdidas. Perda silenciosa era um problema grave
+        // em eventos com baixa conectividade (operador escaneava offline,
+        // sessão expirava, logout apagava a fila sem nenhum aviso).
+        const pendingCount = offlineQueue.filter(
+          (q) => q.status === 'pending' || q.status === 'syncing' || q.status === 'failed',
+        ).length
+        if (pendingCount > 0) {
+          Alert.alert(
+            'Sessão expirada',
+            `Sessão expirada — ${pendingCount} ação${pendingCount === 1 ? '' : 'ões'} offline perdida${pendingCount === 1 ? '' : 's'}. Reconecte para continuar.`,
+            [{ text: 'OK' }],
+          )
+        }
         logout().catch(() => { /* logout sempre best-effort */ })
+        return
+      }
+
+      // BUG 4 fix: 403 não deve deslogar — o usuário pode estar válido mas
+      // tentou uma operação sem permissão (ex: evento de outro organizador).
+      // Apenas exibe alerta; o erro ainda é propagado pro caller pelo React Query.
+      if (err.status === 403) {
+        Alert.alert('Acesso negado', 'Acesso negado a esta operação', [{ text: 'OK' }])
       }
     }
     const queryUnsub = queryClient.getQueryCache().subscribe((event) => {
@@ -107,7 +132,9 @@ function AppRouter() {
       }
     })
     return () => { queryUnsub(); mutUnsub() }
-  }, [isLoggedIn, queryClient, logout])
+  // offlineQueue is intentionally in deps: handler must read latest queue length
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn, queryClient, logout, offlineQueue])
 
   // Invalida queries quando o app volta pra online. Sem isso, a lista de
   // participants/inventory continua mostrando os dados cacheados do offline

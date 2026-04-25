@@ -70,6 +70,10 @@ interface OfflineState {
 
 const MAX_AUTO_ATTEMPTS = 3
 const ACTION_TIMEOUT_MS = 15_000
+/** Número de ações processadas em paralelo por rodada de sync. */
+const BATCH_SIZE = 10
+/** Delay mínimo entre batches pra evitar rajada de requests (ms). */
+const MIN_BATCH_DELAY_MS = 200
 
 /** Cap do backoff (60s). Acima disso, espera é demais e operador deve drenar manual. */
 const BACKOFF_CAP_MS = 60_000
@@ -423,76 +427,120 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
         return { synced: 0, failed: 0 }
       }
 
-      for (const action of pending) {
+      // Processa ações em batches de BATCH_SIZE pra evitar 429 ao drenar filas
+      // grandes (até 5000 itens). Após cada batch:
+      //   1. Respeita `Retry-After` do servidor se algum request retornou 429.
+      //   2. Aguarda MIN_BATCH_DELAY_MS entre batches mesmo sem 429 (anti-burst).
+      // BUG 5 fix: cada request cria seu próprio AbortController — abortar um
+      // request não cancela os outros do mesmo batch.
+      for (let batchStart = 0; batchStart < pending.length; batchStart += BATCH_SIZE) {
         // Se wipeAll foi chamado durante o loop (logout), interrompe gracefully.
         if (!syncRunning) break
 
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), ACTION_TIMEOUT_MS)
+        const batch = pending.slice(batchStart, batchStart + BATCH_SIZE)
+        let retryAfterMs = 0
 
-        try {
-          await updateQueueItem(action.id, {
-            status: 'syncing',
-            attempts: action.attempts + 1,
-          })
-          await callApi(action, controller.signal)
-          clearTimeout(timeoutId)
-          await removeFromQueue(action.id)
-          synced++
-        } catch (err) {
-          clearTimeout(timeoutId)
-          const apiErr = err instanceof ApiError ? err : null
+        // Processa o batch em paralelo — cada ação com seu próprio controller.
+        await Promise.all(
+          batch.map(async (action) => {
+            if (!syncRunning) return
 
-          // 409 = já processado no servidor (outro operador ou double scan).
-          // Remove da fila — conta como sync.
-          if (apiErr?.status === 409) {
-            await removeFromQueue(action.id).catch(() => {})
-            synced++
-            continue
-          }
+            // BUG 5: novo AbortController por request, não compartilhado.
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => controller.abort(), ACTION_TIMEOUT_MS)
 
-          // 401/403 = token expirado ou sem permissão. NÃO removemos da fila
-          // pra operador perceber que precisa re-logar. Itens ficam visíveis
-          // no painel de erros em Perfil.
-          if (apiErr && (apiErr.status === 401 || apiErr.status === 403)) {
-            await updateQueueItem(action.id, {
-              status: 'failed',
-              error: 'Token expirado — faça login novamente',
-            }).catch(() => {})
-            failed++
-            continue
-          }
+            try {
+              await updateQueueItem(action.id, {
+                status: 'syncing',
+                attempts: action.attempts + 1,
+              })
+              await callApi(action, controller.signal)
+              clearTimeout(timeoutId)
+              await removeFromQueue(action.id)
+              synced++
+            } catch (err) {
+              clearTimeout(timeoutId)
+              const apiErr = err instanceof ApiError ? err : null
 
-          // 404/410 = recurso não existe mais no servidor (participante/evento
-          // deletado). Nada a fazer — remove silenciosamente.
-          if (apiErr && (apiErr.status === 404 || apiErr.status === 410)) {
-            await removeFromQueue(action.id).catch(() => {})
-            synced++
-            continue
-          }
+              // 429 = rate-limit. Captura Retry-After pra aguardar antes do
+              // próximo batch. Não marca como failed — ficará pending e tentará
+              // no próximo syncNow ou quando o timer vencer.
+              if (apiErr?.status === 429) {
+                const retryAfterRaw = apiErr.retryAfter ?? 0
+                const retryAfterSec =
+                  typeof retryAfterRaw === 'number'
+                    ? retryAfterRaw
+                    : parseInt(String(retryAfterRaw), 10) || 0
+                retryAfterMs = Math.max(retryAfterMs, retryAfterSec * 1000)
+                await updateQueueItem(action.id, {
+                  status: 'failed',
+                  error: 'Rate limit — aguardando servidor',
+                  nextRetryAt: computeNextRetryAt(action.attempts + 1),
+                }).catch(() => {})
+                failed++
+                return
+              }
 
-          // 400/422 = payload inválido. Retry não resolve — marca como falha
-          // pra operador ver a mensagem do servidor e poder descartar.
-          if (apiErr && (apiErr.status === 400 || apiErr.status === 422)) {
-            await updateQueueItem(action.id, {
-              status: 'failed',
-              error: apiErr.message || `Erro de validação (${apiErr.status})`,
-            }).catch(() => {})
-            failed++
-            continue
-          }
+              // 409 = já processado no servidor (outro operador ou double scan).
+              // Remove da fila — conta como sync.
+              if (apiErr?.status === 409) {
+                await removeFromQueue(action.id).catch(() => {})
+                synced++
+                return
+              }
 
-          // Outros erros (rede, timeout, 5xx) → marca failed, elegível pra retry.
-          // Backoff exponencial com jitter pra evitar thundering herd quando
-          // múltiplos scanners voltam online juntos. nextRetryAt é checado pelo
-          // filter de pending no próximo syncNow.
-          const msg = humanizeError(err)
-          await updateQueueItem(action.id, {
-            status: 'failed',
-            error: msg,
-            nextRetryAt: computeNextRetryAt(action.attempts + 1),
-          }).catch(() => {})
-          failed++
+              // 401/403 = token expirado ou sem permissão. NÃO removemos da fila
+              // pra operador perceber que precisa re-logar. Itens ficam visíveis
+              // no painel de erros em Perfil.
+              if (apiErr && (apiErr.status === 401 || apiErr.status === 403)) {
+                await updateQueueItem(action.id, {
+                  status: 'failed',
+                  error: 'Token expirado — faça login novamente',
+                }).catch(() => {})
+                failed++
+                return
+              }
+
+              // 404/410 = recurso não existe mais no servidor (participante/evento
+              // deletado). Nada a fazer — remove silenciosamente.
+              if (apiErr && (apiErr.status === 404 || apiErr.status === 410)) {
+                await removeFromQueue(action.id).catch(() => {})
+                synced++
+                return
+              }
+
+              // 400/422 = payload inválido. Retry não resolve — marca como falha
+              // pra operador ver a mensagem do servidor e poder descartar.
+              if (apiErr && (apiErr.status === 400 || apiErr.status === 422)) {
+                await updateQueueItem(action.id, {
+                  status: 'failed',
+                  error: apiErr.message || `Erro de validação (${apiErr.status})`,
+                }).catch(() => {})
+                failed++
+                return
+              }
+
+              // Outros erros (rede, timeout, 5xx) → marca failed, elegível pra retry.
+              // Backoff exponencial com jitter pra evitar thundering herd quando
+              // múltiplos scanners voltam online juntos. nextRetryAt é checado pelo
+              // filter de pending no próximo syncNow.
+              const msg = humanizeError(err)
+              await updateQueueItem(action.id, {
+                status: 'failed',
+                error: msg,
+                nextRetryAt: computeNextRetryAt(action.attempts + 1),
+              }).catch(() => {})
+              failed++
+            }
+          }),
+        )
+
+        // Não aguarda delay após o último batch.
+        const hasMore = batchStart + BATCH_SIZE < pending.length
+        if (hasMore && syncRunning) {
+          // Respeita Retry-After do servidor; aplica pelo menos MIN_BATCH_DELAY_MS.
+          const waitMs = Math.max(retryAfterMs, MIN_BATCH_DELAY_MS)
+          await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
         }
       }
     } finally {

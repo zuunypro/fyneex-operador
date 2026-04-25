@@ -16,6 +16,8 @@ import { colors, font, radius } from '@/theme'
 import { apiPost, ApiError } from '@/services/api'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useUserStore } from '@/stores/userStore'
+import { useOfflineStore } from '@/stores/offlineStore'
+import { clearQueue } from '@/services/offline'
 import type { User } from '@/schemas/user.schema'
 import { Icon } from '@/components/Icon'
 
@@ -38,6 +40,8 @@ export function LoginPage() {
   const [errorMessage, setErrorMessage] = useState('')
   const setIsLoggedIn = useNavigationStore((s) => s.setIsLoggedIn)
   const setUser = useUserStore((s) => s.setUser)
+  const currentUser = useUserStore((s) => s.user)
+  const refreshOfflineState = useOfflineStore((s) => s.refreshState)
 
   async function handleSubmit() {
     if (isLoading) return
@@ -52,6 +56,13 @@ export function LoginPage() {
           email: res.user.email,
           accessHash: res.user.accessHash,
           organizerId: res.user.organizerId,
+        }
+        // BUG 2 fix: se havia outro usuário logado, limpa a fila pendente antes
+        // de escrever a nova sessão. Ações do usuário A não podem vazar pro
+        // usuário B — são de eventos, tokens e contextos diferentes.
+        if (currentUser && currentUser.id !== user.id) {
+          await clearQueue().catch(() => { /* best-effort */ })
+          await refreshOfflineState().catch(() => { /* best-effort */ })
         }
         await setUser(user)
         setIsLoggedIn(true)
