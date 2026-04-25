@@ -20,7 +20,7 @@ import { useInventory } from '@/hooks/useInventory'
 import { useToast } from '@/hooks/useToast'
 import { buildSearchIndex, groupByOrder, matchByIndex, type GroupInfo } from '@/utils/participants'
 import { normalizeForSearch } from '@/utils/text'
-import { formatCpfLast5 } from '@/utils/format'
+import { formatCpfLast5, formatPhoneBR } from '@/utils/format'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { StalePacketWarning } from '@/components/StalePacketWarning'
 import { feedbackBad, feedbackOk } from '@/utils/feedback'
@@ -639,6 +639,7 @@ const KitRow = memo(function KitRow({
   onRevert: () => void
   group?: GroupInfo
 }) {
+  const [expanded, setExpanded] = useState(false)
   return (
     <View style={[styles.row, isPending && { opacity: 0.7 }]}>
       {group ? (
@@ -666,7 +667,10 @@ const KitRow = memo(function KitRow({
           ) : null}
         </View>
 
-        <View style={{ flex: 1, minWidth: 0 }}>
+        <Pressable
+          onPress={() => setExpanded(!expanded)}
+          style={{ flex: 1, minWidth: 0 }}
+        >
           <View style={styles.rowNameLine}>
             <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
             {p.instanceIndex !== undefined && p.instanceTotal !== undefined ? (
@@ -687,26 +691,29 @@ const KitRow = memo(function KitRow({
               Comprador: {p.buyerName}
             </Text>
           ) : null}
-          <Text style={styles.rowMetaText} numberOfLines={1}>
-            {group ? `${group.pos}/${group.total} · ` : ''}
-            {p.orderNumber}
-            {p.ticketName ? ` · ${p.ticketName}` : ''}
-            {p.batch ? ` · ${p.batch}` : ''}
-            {p.buyerCpfLast5 ? ` · CPF ${formatCpfLast5(p.buyerCpfLast5)}` : ' · sem CPF'}
-          </Text>
-        </View>
+          <View style={styles.rowMeta}>
+            <Text style={styles.rowMetaText} numberOfLines={1}>
+              {group ? `${group.pos}/${group.total} · ` : ''}
+              {p.orderNumber}
+              {p.ticketName ? ` · ${p.ticketName}` : ''}
+              {p.batch ? ` · ${p.batch}` : ''}
+              {p.buyerCpfLast5 ? ` · CPF ${formatCpfLast5(p.buyerCpfLast5)}` : ' · sem CPF'}
+            </Text>
+            <Icon
+              name="expand_more"
+              size={13}
+              color={colors.textTertiary}
+              style={{ transform: [{ rotate: expanded ? '180deg' : '0deg' }] }}
+            />
+          </View>
+        </Pressable>
 
         {isDone ? (
           <Pressable
-            onPress={onRevert}
-            disabled={isReverting}
-            style={[styles.doneBlock, isReverting && { opacity: 0.5 }]}
+            onPress={() => setExpanded(!expanded)}
+            style={styles.doneBlock}
           >
-            {isReverting ? (
-              <ActivityIndicator size="small" color={colors.accentGreen} />
-            ) : (
-              <Icon name="check_circle" size={16} color={colors.accentGreen} />
-            )}
+            <Icon name="check_circle" size={16} color={colors.accentGreen} />
             <Text style={styles.doneLabel}>Entregue</Text>
           </Pressable>
         ) : isPending ? (
@@ -720,9 +727,137 @@ const KitRow = memo(function KitRow({
           </Pressable>
         )}
       </View>
+
+      {expanded ? (
+        <View style={styles.details}>
+          <View>
+            <Text style={styles.detailSectionLabel}>Comprador</Text>
+            <View style={styles.detailGrid}>
+              <DetailField label="Nome" value={p.buyerName || '—'} />
+              <DetailField label="Email" value={p.buyerEmail || p.email || '—'} />
+              <DetailField label="Telefone" value={formatPhoneBR(p.buyerPhone)} />
+              <DetailField
+                label="CPF (final)"
+                value={formatCpfLast5(p.buyerCpfLast5)}
+              />
+            </View>
+          </View>
+
+          <View>
+            <Text style={styles.detailSectionLabel}>Compra</Text>
+            <View style={styles.detailGrid}>
+              <DetailField label="Pedido" value={p.orderNumber || '—'} />
+              <DetailField label="Ingresso" value={p.ticketName || '—'} />
+              {p.batch ? <DetailField label="Lote" value={p.batch} /> : null}
+            </View>
+          </View>
+
+          {(() => {
+            const allFields = p.instanceFields || []
+            // Separa campos do kit (Camiseta, Medalha, Garrafa, etc.) dos
+            // dados pessoais (Nome, Email, Telefone, CPF). Operador no
+            // estoque precisa ver tamanho/cor selecionados rapidinho —
+            // por isso o "Kit / Configurações" vem com destaque, antes
+            // dos demais dados do participante.
+            const kitLabels = ['camiseta', 'medalha', 'garrafa', 'troféu', 'trofeu', 'brinde', 'kit', 'tamanho', 'cor', 'modelo', 'variante']
+            const isKitField = (label: string) => {
+              const l = label.toLowerCase()
+              return kitLabels.some((k) => l.includes(k))
+            }
+            const isIdentityField = (label: string) => {
+              const l = label.toLowerCase()
+              return l.includes('nome') || l.includes('email') || l.includes('telefone') || l.includes('cpf') || l.includes('rg')
+            }
+            const kitFields = allFields.filter((f) => isKitField(f.label))
+            const otherFields = allFields.filter(
+              (f) => !isKitField(f.label) && !isIdentityField(f.label),
+            )
+            const formUnfilled = p.nameFromForm === false && allFields.length === 0
+            return (
+              <>
+                {kitFields.length > 0 ? (
+                  <View>
+                    <Text style={styles.detailSectionLabel}>Kit / Configurações</Text>
+                    <View style={styles.detailGrid}>
+                      {kitFields.map((f) => (
+                        <DetailField key={f.label} label={f.label} value={f.value} />
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+                {otherFields.length > 0 ? (
+                  <View>
+                    <Text style={styles.detailSectionLabel}>Dados do participante</Text>
+                    <View style={styles.detailGrid}>
+                      {otherFields.map((f) => (
+                        <DetailField key={f.label} label={f.label} value={f.value} />
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+                {formUnfilled ? (
+                  <View style={styles.noFormBlock}>
+                    <Icon name="priority_high" size={14} color={colors.accentOrange} />
+                    <Text style={styles.noFormText}>
+                      Participante ainda não preencheu o formulário do evento. Confirme a identidade pelo CPF do comprador (acima) ou pelo número do pedido. Sem dados do kit selecionado — entrega tem que ser combinada com o comprador.
+                    </Text>
+                  </View>
+                ) : null}
+                {!formUnfilled && kitFields.length === 0 ? (
+                  <View style={styles.noFormBlock}>
+                    <Icon name="info" size={14} color={colors.accentOrange} />
+                    <Text style={styles.noFormText}>
+                      Pedido sem itens de kit configurados — só check-in se aplica.
+                    </Text>
+                  </View>
+                ) : null}
+              </>
+            )
+          })()}
+
+          <View>
+            <Text style={styles.detailSectionLabel}>Status retirada</Text>
+            {isDone && p.kitWithdrawnAt ? (
+              <Text style={styles.statusOkText}>
+                ✓ {formatWithdrawnAt(p.kitWithdrawnAt)}
+              </Text>
+            ) : isDone ? (
+              <Text style={styles.statusOkText}>✓ Kit já entregue</Text>
+            ) : (
+              <Text style={styles.statusPendingText}>● Pendente — kit ainda não entregue</Text>
+            )}
+          </View>
+
+          {isDone ? (
+            <Pressable
+              onPress={onRevert}
+              disabled={isReverting}
+              style={[styles.revertButton, isReverting && { opacity: 0.7 }]}
+            >
+              {isReverting ? (
+                <ActivityIndicator size="small" color={colors.accentRed} />
+              ) : (
+                <Icon name="refresh" size={16} color={colors.accentRed} />
+              )}
+              <Text style={styles.revertLabel}>
+                {isReverting ? 'Revertendo...' : 'Reverter retirada'}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
     </View>
   )
 })
+
+function DetailField({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.detailField}>
+      <Text style={styles.detailFieldLabel}>{label}</Text>
+      <Text style={styles.detailFieldValue} numberOfLines={1}>{value}</Text>
+    </View>
+  )
+}
 
 function formatWithdrawnAt(iso: string | null | undefined): string | undefined {
   if (!iso) return 'Kit já retirado para este ingresso.'
@@ -1064,10 +1199,99 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontStyle: 'italic',
   },
+  rowMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   rowMetaText: {
+    flex: 1,
     fontSize: 11,
     fontWeight: font.weight.medium,
     color: colors.textTertiary,
+  },
+  details: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: radius.md,
+    backgroundColor: colors.bgBase,
+    borderWidth: 1,
+    borderColor: colors.borderMuted,
+    gap: 10,
+  },
+  detailSectionLabel: {
+    fontSize: 10,
+    fontWeight: font.weight.bold,
+    color: colors.textTertiary,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  detailGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  detailField: {
+    width: '50%',
+    paddingRight: 10,
+    paddingBottom: 6,
+  },
+  detailFieldLabel: {
+    fontSize: 9,
+    fontWeight: font.weight.bold,
+    color: colors.textTertiary,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  detailFieldValue: {
+    fontSize: 11,
+    fontWeight: font.weight.semibold,
+    color: '#B0B0B0',
+  },
+  noFormBlock: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: radius.md,
+    backgroundColor: '#1F1A0F',
+    borderWidth: 1,
+    borderColor: '#4B3012',
+  },
+  noFormText: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: font.weight.semibold,
+    color: '#E8C77A',
+    lineHeight: 15,
+  },
+  statusOkText: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.accentGreen,
+  },
+  statusPendingText: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.accentOrange,
+  },
+  revertButton: {
+    marginTop: 4,
+    height: 36,
+    borderRadius: radius.md,
+    backgroundColor: '#2A1414',
+    borderWidth: 1,
+    borderColor: '#4A1F1F',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  revertLabel: {
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: colors.accentRed,
   },
   doneBlock: {
     flexDirection: 'row',
