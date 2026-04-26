@@ -84,8 +84,10 @@ export function parseFyneexQrToken(raw: string): ScannedToken | null {
       // Log truncado pra debug em prod via remote logger (Sentry/similar
       // captura console.warn). Truncamos a 50 chars pra não vazar payload
       // grande adversarial. Não muda UX — operador vê só o flash 'bad'.
-      const sample = trimmed.slice(0, 50)
-      console.warn('[QRScanner] Falha ao decodificar QR fyx:', sample, err)
+      if (__DEV__) {
+        const sample = trimmed.slice(0, 50)
+        console.warn('[QRScanner] Falha ao decodificar QR fyx:', sample, err)
+      }
       return null
     }
   }
@@ -95,7 +97,9 @@ export function parseFyneexQrToken(raw: string): ScannedToken | null {
   }
 
   // QR não bate com nenhum formato conhecido — ajuda debug remoto.
-  console.warn('[QRScanner] QR em formato desconhecido:', trimmed.slice(0, 50))
+  if (__DEV__) {
+    console.warn('[QRScanner] QR em formato desconhecido:', trimmed.slice(0, 50))
+  }
   return null
 }
 
@@ -123,6 +127,21 @@ export function QRScanner({
   // — ao chegar a 3, exibe banner forte sugerindo input manual (câmera
   // possivelmente quebrada / QR ruim / mau enquadramento).
   const [manualHintForced, setManualHintForced] = useState(false)
+
+  // Facing default 'back'. Se mount falha (device só com frontal, ou câmera
+  // traseira ocupada/quebrada), tenta automático pra 'front'. Se as duas
+  // falharem, mostra UI fatal recuperável.
+  const [facing, setFacing] = useState<'back' | 'front'>('back')
+  const [bothCamerasFailed, setBothCamerasFailed] = useState(false)
+  const triedFrontRef = useRef(false)
+
+  // Detecção de "preview preto / câmera ocupada": se em 5s o onCameraReady
+  // não disparar, mostra banner sugerindo reiniciar a câmera. O remount é
+  // feito mudando a `key` do CameraView (bumping cameraKey).
+  const [cameraReady, setCameraReady] = useState(false)
+  const [showResetBanner, setShowResetBanner] = useState(false)
+  const [cameraKey, setCameraKey] = useState(0)
+  const readyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const scannedRef = useRef(false)
   const lastRawRef = useRef<{ raw: string; at: number } | null>(null)
@@ -164,9 +183,57 @@ export function QRScanner({
     if (flashRef.current) clearTimeout(flashRef.current)
     if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current)
     if (errorClearRef.current) clearTimeout(errorClearRef.current)
+    if (readyTimeoutRef.current) clearTimeout(readyTimeoutRef.current)
     // Reset semáforo: se o componente desmontar durante onScan (usuário troca
     // de aba em < 180ms), a próxima montagem começa sem o lock travado.
     scannedRef.current = false
+  }, [])
+
+  // Watchdog: se em 5s pós permission o cameraReady não disparou, mostra
+  // banner "Reiniciar câmera". Usuário toca → bump cameraKey força remount.
+  // Reseta a cada cameraKey/permission change.
+  useEffect(() => {
+    if (!permission?.granted || bothCamerasFailed) return
+    if (cameraReady) {
+      if (readyTimeoutRef.current) clearTimeout(readyTimeoutRef.current)
+      setShowResetBanner(false)
+      return
+    }
+    if (readyTimeoutRef.current) clearTimeout(readyTimeoutRef.current)
+    readyTimeoutRef.current = setTimeout(() => {
+      setShowResetBanner(true)
+    }, 5000)
+    return () => {
+      if (readyTimeoutRef.current) clearTimeout(readyTimeoutRef.current)
+    }
+  }, [permission?.granted, cameraReady, cameraKey, bothCamerasFailed])
+
+  const handleMountError = useCallback((err: { message?: string }) => {
+    const msg = (err?.message || '').toLowerCase()
+    // Heurística: erro contém indicação de câmera não disponível? Tenta frontal.
+    // Se já tentou frontal antes, marca fatal. Heurística generosa porque o
+    // texto exato varia entre OEM/Android version.
+    const looksUnavailable = !msg || msg.includes('not available') || msg.includes('unavailable')
+      || msg.includes('no camera') || msg.includes('back') || msg.includes('failed')
+    if (!triedFrontRef.current && looksUnavailable) {
+      triedFrontRef.current = true
+      setFacing('front')
+      setCameraReady(false)
+      setCameraKey((k) => k + 1)
+      return
+    }
+    setBothCamerasFailed(true)
+  }, [])
+
+  const handleCameraReady = useCallback(() => {
+    setCameraReady(true)
+    setShowResetBanner(false)
+  }, [])
+
+  const handleResetCamera = useCallback(() => {
+    setCameraReady(false)
+    setShowResetBanner(false)
+    setCameraKey((k) => k + 1)
   }, [])
 
   const handleDetected = useCallback((raw: string) => {
@@ -289,12 +356,15 @@ export function QRScanner({
 
   return (
     <View style={styles.root}>
-      {permission?.granted ? (
+      {permission?.granted && !bothCamerasFailed ? (
         <CameraView
+          key={cameraKey}
           style={StyleSheet.absoluteFillObject}
-          facing="back"
+          facing={facing}
           barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
           onBarcodeScanned={({ data }) => handleDetected(data)}
+          onCameraReady={handleCameraReady}
+          onMountError={handleMountError}
         />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, styles.blank]} />
@@ -423,6 +493,35 @@ export function QRScanner({
           <Pressable onPress={requestPermission} style={styles.deniedButton}>
             <Text style={styles.deniedButtonLabel}>Permitir câmera</Text>
           </Pressable>
+        </View>
+      ) : null}
+
+      {bothCamerasFailed ? (
+        // Câmera traseira E frontal falharam — devices muito antigos / hardware
+        // quebrado. Operador só consegue avançar via input manual; UI fatal
+        // bloqueia o viewfinder pra deixar isso óbvio.
+        <View style={styles.deniedOverlay} pointerEvents="box-none">
+          <View style={styles.fatalCard}>
+            <Text style={styles.fatalCardTitle}>Câmera não disponível neste dispositivo</Text>
+            <Text style={styles.fatalCardHint}>Use o botão "Digitar código" abaixo.</Text>
+            <Pressable onPress={onClose} style={styles.deniedButton}>
+              <Text style={styles.deniedButtonLabel}>Voltar</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {showResetBanner && !bothCamerasFailed && !denied ? (
+        // Câmera demorou >5s pra ficar ready (preview preto / câmera ocupada
+        // por outro app / driver travado). Banner discreto no topo da área
+        // central oferece reset (remount via key bump).
+        <View style={styles.resetBannerWrap} pointerEvents="box-none">
+          <View style={styles.resetBanner}>
+            <Text style={styles.resetBannerText}>Câmera demorando — reinicie</Text>
+            <Pressable onPress={handleResetCamera} style={styles.resetBannerButton}>
+              <Text style={styles.resetBannerButtonLabel}>Reiniciar</Text>
+            </Pressable>
+          </View>
         </View>
       ) : null}
     </View>
@@ -680,6 +779,66 @@ const styles = StyleSheet.create({
   },
   deniedButtonLabel: {
     fontSize: 14,
+    fontWeight: font.weight.bold,
+    color: colors.textPrimary,
+  },
+  fatalCard: {
+    paddingHorizontal: 22,
+    paddingVertical: 18,
+    borderRadius: radius.lg,
+    backgroundColor: 'rgba(20,20,20,0.95)',
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+    alignItems: 'center',
+    gap: 12,
+    maxWidth: 320,
+  },
+  fatalCardTitle: {
+    fontSize: 14,
+    fontWeight: font.weight.extrabold,
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  fatalCardHint: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: '#B0B0B0',
+    textAlign: 'center',
+  },
+  resetBannerWrap: {
+    position: 'absolute',
+    top: 80,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  resetBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: radius.pill,
+    backgroundColor: 'rgba(31,26,15,0.95)',
+    borderWidth: 1,
+    borderColor: '#6B4A1A',
+  },
+  resetBannerText: {
+    fontSize: 12,
+    fontWeight: font.weight.bold,
+    color: '#E8C77A',
+  },
+  resetBannerButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.bgSurface,
+    borderWidth: 1,
+    borderColor: colors.borderDefault,
+  },
+  resetBannerButtonLabel: {
+    fontSize: 11,
     fontWeight: font.weight.bold,
     color: colors.textPrimary,
   },

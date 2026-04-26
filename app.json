@@ -1,11 +1,10 @@
 {
   "expo": {
-    "name": "FYNEEX Operador",
+    "name": "Fyneex Organizador",
     "slug": "fyneex-operador",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "scheme": "fyneex",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#111111",
     "newArchEnabled": true,
@@ -24,6 +23,7 @@
     "android": {
       "package": "com.fyneex.operador",
       "versionCode": 1,
+      "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#111111"
@@ -48,11 +48,17 @@
         "expo-build-properties",
         {
           "android": {
-            "kotlinVersion": "1.9.25"
+            "kotlinVersion": "1.9.25",
+            "usesCleartextTraffic": false,
+            "networkSecurityConfig": "./network_security_config.xml",
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "extraProguardRules": "-keep class com.fyneex.operador.** { *; }\n-dontwarn org.conscrypt.**\n-dontwarn com.facebook.react.**\n-keep class com.facebook.hermes.** { *; }\n-keep class com.swmansion.reanimated.** { *; }\n-keep class com.swmansion.worklets.** { *; }\n-keep class expo.modules.** { *; }\n-keep class expo.modules.securestore.** { *; }\n-dontwarn expo.modules.**"
           }
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-secure-store"
     ],
     "runtimeVersion": {
       "policy": "appVersion"

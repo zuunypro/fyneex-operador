@@ -1,4 +1,4 @@
-# FYNEEX Operador — App Nativo
+# Fyneex Organizador — App Nativo
 
 App nativo Android do portal do operador (Expo SDK 52 + React Native 0.76). Porta 1:1 a versão web antiga (`web-legacy/`), troca scanner HTML por ML Kit nativo (offline), e usa Expo EAS pra build + OTA.
 
@@ -128,7 +128,7 @@ celular/
 
 ## ❓ Troubleshooting
 
-- **Câmera em preto:** Configurações > Apps > FYNEEX Operador > Permissões > Câmera
+- **Câmera em preto:** Configurações > Apps > Fyneex Organizador > Permissões > Câmera
 - **"Falha de rede" no login:** CORS do backend (veja acima) ou URL errada no `.env`
 - **Update OTA não chegou:** `eas update:list --branch preview` — confira se `app.json > expo.updates.url` aponta pro `projectId` correto. App só busca em release build (não em dev)
 - **APK não instala:** permitir "fontes desconhecidas" nas configs Android pro app que abre o APK

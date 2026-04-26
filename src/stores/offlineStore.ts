@@ -21,6 +21,7 @@ import {
   loadIndex,
   loadQueue,
   migrateLegacyAsyncStorage,
+  purgeLegacyQueueBackup,
   removeFromQueue,
   removeFromQueueByEvent,
   removePacket,
@@ -262,6 +263,10 @@ export const useOfflineStore = create<OfflineState>((set, get) => ({
       // One-shot migration de packets/queue antigos do AsyncStorage pra
       // SQLite. Subsequentes boots fazem skip imediato via flag.
       await migrateLegacyAsyncStorage()
+      // Hardening 2026-04-26: limpa chaves AsyncStorage residuais do antigo
+      // queue backup (pré-SQLite). One-shot via flag — best-effort, não
+      // bloqueia hydrate se falhar.
+      purgeLegacyQueueBackup().catch(() => { /* ignore */ })
       const [packets, queue] = await Promise.all([loadIndex(), loadQueue()])
       set({ packets, queue })
 

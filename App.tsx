@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Alert, AppState, type AppStateStatus, StyleSheet, View } from 'react-native'
+import {
+  ActivityIndicator,
+  Alert,
+  AppState,
+  type AppStateStatus,
+  StyleSheet,
+  Text as RNText,
+  TextInput as RNTextInput,
+  Text,
+  View,
+} from 'react-native'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
@@ -11,9 +21,11 @@ import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persi
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { AppShell } from '@/components/AppShell'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { ApiError } from '@/services/api'
+import { ApiError, getBaseUrlError } from '@/services/api'
 import { closeDb } from '@/services/db'
-import { colors } from '@/theme'
+import { initDeviceIdHash } from '@/services/secureToken'
+import { colors, font } from '@/theme'
+import { useAppBackHandler } from '@/hooks/useAppBackHandler'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { setSyncQueryClient, useOfflineStore } from '@/stores/offlineStore'
 import { loadUserFromStorage, useUserStore } from '@/stores/userStore'
@@ -23,6 +35,15 @@ import { DashboardPage } from '@/pages/DashboardPage'
 import { CheckinPage } from '@/pages/CheckinPage'
 import { StockPage } from '@/pages/StockPage'
 import { ProfilePage } from '@/pages/ProfilePage'
+
+// Bloqueia escala de fonte do OS pra evitar layout breaking em devices com
+// "Letras enormes" / "Tamanho de fonte máximo". O design já é validado em
+// um único tamanho — escalar quebra alinhamento de viewfinder do scanner,
+// pills de status, contadores de estoque, etc.
+if ((RNText as any).defaultProps == null) (RNText as any).defaultProps = {}
+;(RNText as any).defaultProps.allowFontScaling = false
+if ((RNTextInput as any).defaultProps == null) (RNTextInput as any).defaultProps = {}
+;(RNTextInput as any).defaultProps.allowFontScaling = false
 
 // Pinta o background nativo ANTES do React montar (evita flash branco).
 SystemUI.setBackgroundColorAsync(colors.bgBase).catch(() => { /* ignore */ })
@@ -84,6 +105,11 @@ function AppRouter() {
   const queryClient = useQueryClient()
   const [hydrated, setHydrated] = useState(false)
 
+  // Hardware back: trata navegação por tabs / evento / dashboard exit.
+  // Só monta o handler quando logado — em LoginPage, back fecha o app
+  // (comportamento padrão esperado de uma tela de auth).
+  useAppBackHandler()
+
   // Logout automático ao detectar 401 em qualquer query/mutation. Antes disso
   // apenas EventSelectorPage tratava — operador no portão tomava 401 numa
   // mutation de checkin/withdrawal e via toast "saia e entre de novo" sem ser
@@ -119,7 +145,8 @@ function AppRouter() {
         ;(async () => {
           try { await wipeAll() } catch { /* best-effort */ }
           try { await closeDb() } catch { /* best-effort */ }
-          await logout().catch(() => { /* logout sempre best-effort */ })
+          // skipServer: token já é inválido (401), não vale gastar tempo chamando /logout
+          await logout({ skipServer: true }).catch(() => { /* logout sempre best-effort */ })
         })()
         return
       }
@@ -168,7 +195,14 @@ function AppRouter() {
 
   useEffect(() => {
     let alive = true
-    Promise.all([loadUserFromStorage(), hydrateOffline()]).then(([user]) => {
+    // initDeviceIdHash priming pra que getAuthHeaders() (sync) consiga ler
+    // X-Device-Id do cache no primeiro request. Roda em paralelo com user/
+    // offline hydration — não bloqueia UI.
+    Promise.all([
+      initDeviceIdHash().catch(() => { /* fail-soft, header fica ausente */ }),
+      loadUserFromStorage(),
+      hydrateOffline(),
+    ]).then(([, user]) => {
       if (!alive) return
       if (user) {
         setUser(user)
@@ -197,6 +231,22 @@ function AppRouter() {
   }, [])
 
   if (!hydrated) return <PageFallback />
+
+  // Antes da rota normal: se BASE_URL é inválida (env corrompida ou OTA
+  // adversarial alterou `extra.apiUrl`), mostra tela fatal recuperável em
+  // vez de crashar. Operador pode atualizar o app pra restaurar config.
+  const baseUrlError = getBaseUrlError()
+  if (baseUrlError) {
+    return (
+      <View style={styles.fatalScreen}>
+        <Text style={styles.fatalTitle}>Erro de configuração</Text>
+        <Text style={styles.fatalMessage}>
+          {baseUrlError}
+        </Text>
+        <Text style={styles.fatalHint}>Atualize o app pela loja ou contate o suporte.</Text>
+      </View>
+    )
+  }
 
   if (!isLoggedIn) return <LoginPage />
 
@@ -241,5 +291,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.bgBase,
+  },
+  fatalScreen: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bgBase,
+    paddingHorizontal: 32,
+    gap: 12,
+  },
+  fatalTitle: {
+    fontSize: 18,
+    fontWeight: font.weight.extrabold,
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  fatalMessage: {
+    fontSize: 13,
+    fontWeight: font.weight.semibold,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  fatalHint: {
+    fontSize: 12,
+    fontWeight: font.weight.semibold,
+    color: colors.textTertiary,
+    textAlign: 'center',
+    marginTop: 8,
   },
 })

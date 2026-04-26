@@ -85,6 +85,24 @@ const SCHEMA_MIGRATIONS: { version: number; sql: string }[] = [
         ON participants(event_id, participant_id, instance_index);
     `,
   },
+  {
+    // v3 (hardening 2026-04-26): queue backup migrado de AsyncStorage pra
+    // SQLite. AsyncStorage no Android era lido por backup/ADB com app
+    // backupable; agora o backup mora no DB que tem allowBackup:false. Cada
+    // row representa um snapshot inteiro de um logout — payload_json contém
+    // PendingAction[] serializado. Cleanup faz DELETE WHERE backed_up_at <
+    // now - TTL na primeira leitura.
+    version: 3,
+    sql: `
+      CREATE TABLE IF NOT EXISTS pending_actions_backup (
+        id TEXT PRIMARY KEY,
+        backed_up_at INTEGER NOT NULL,
+        action_count INTEGER NOT NULL DEFAULT 0,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_actions_backup_at ON pending_actions_backup(backed_up_at);
+    `,
+  },
 ]
 
 async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {

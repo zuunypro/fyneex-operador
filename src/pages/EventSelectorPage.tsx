@@ -129,7 +129,11 @@ export function EventSelectorPage() {
                       <Icon name="group" size={14} color={colors.accentGreen} />
                       <Text style={styles.participantsCount}>{ev.participantsCount}</Text>
                     </View>
-                    {ev.status && ev.status !== 'published' ? (
+                    {/* O endpoint /api/mobile/events só retorna eventos
+                       'published' (rodando) ou 'active' (sinônimo legado).
+                       Mantido como safety net caso a API volte a expor
+                       outros status no futuro — não deve renderizar hoje. */}
+                    {ev.status && ev.status !== 'published' && ev.status !== 'active' ? (
                       <View style={styles.statusBadge}>
                         <Text
                           style={[

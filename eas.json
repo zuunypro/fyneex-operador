@@ -21,8 +21,15 @@
     "production": {
       "channel": "production",
       "autoIncrement": true,
+      "cache": {
+        "disabled": false
+      },
+      "env": {
+        "EXPO_NO_SOURCE_MAPS": "1"
+      },
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleRelease"
       }
     }
   },

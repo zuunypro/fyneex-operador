@@ -36,7 +36,13 @@ const LEGACY_MIGRATION_MAX_ATTEMPTS = 3
 
 /** Janela conceitual pra purga de backups da queue salvos no logout (7 dias). */
 export const QUEUE_BACKUP_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/**
+ * Prefix das chaves AsyncStorage legacy. Hardening 2026-04-26 moveu o storage
+ * pra tabela pending_actions_backup no SQLite (allowBackup:false + escopo do
+ * app). Mantemos o prefix só pra one-shot cleanup no boot.
+ */
 const QUEUE_BACKUP_PREFIX = 'fyneex_offline_queue_backup_'
+const QUEUE_BACKUP_LEGACY_CLEAN_FLAG = 'fyneex_queue_backup_legacy_cleaned_v1'
 
 /**
  * Stale threshold default pro packet local (em horas). Configurável via prop
@@ -720,14 +726,28 @@ export async function loadInventory(eventId: string): Promise<{ items: Inventory
  * recentes — não restauramos automaticamente porque o usuário logado depois
  * pode ser outro (token diferente, queue do user A no contexto do user B
  * geraria erros de auth confusos).
+ *
+ * Hardening 2026-04-26: backup migrado de AsyncStorage pra tabela
+ * pending_actions_backup no SQLite. AsyncStorage Android era visível em
+ * backup automático + ADB; SQLite + allowBackup:false fica protegido pelo
+ * sandbox do app.
  */
 export async function saveQueueBackup(actions: PendingAction[]): Promise<void> {
   if (actions.length === 0) return
-  const ts = Date.now()
-  const key = `${QUEUE_BACKUP_PREFIX}${ts}`
-  await AsyncStorage.setItem(key, JSON.stringify({ at: ts, actions })).catch(() => {
+  try {
+    const db = await getDb()
+    const ts = Date.now()
+    const id = `backup_${ts}_${Math.random().toString(36).slice(2, 8)}`
+    await db.runAsync(
+      'INSERT INTO pending_actions_backup (id, backed_up_at, action_count, payload_json) VALUES (?, ?, ?, ?)',
+      id,
+      ts,
+      actions.length,
+      JSON.stringify(actions),
+    )
+  } catch {
     // Best-effort: se o backup falha, logout não fica travado.
-  })
+  }
 }
 
 /**
@@ -737,32 +757,44 @@ export async function saveQueueBackup(actions: PendingAction[]): Promise<void> {
  */
 export async function listQueueBackups(): Promise<{ key: string; at: number; count: number }[]> {
   try {
-    const keys = await AsyncStorage.getAllKeys()
-    const backupKeys = keys.filter((k) => k.startsWith(QUEUE_BACKUP_PREFIX))
+    const db = await getDb()
     const now = Date.now()
-    const result: { key: string; at: number; count: number }[] = []
-    const expired: string[] = []
-    for (const k of backupKeys) {
-      const raw = await AsyncStorage.getItem(k)
-      if (!raw) continue
-      try {
-        const parsed = JSON.parse(raw) as { at?: number; actions?: unknown[] }
-        const at = parsed.at ?? 0
-        if (now - at > QUEUE_BACKUP_TTL_MS) {
-          expired.push(k)
-          continue
-        }
-        result.push({ key: k, at, count: Array.isArray(parsed.actions) ? parsed.actions.length : 0 })
-      } catch {
-        expired.push(k)
-      }
-    }
-    if (expired.length > 0) {
-      await AsyncStorage.multiRemove(expired).catch(() => {})
-    }
-    return result.sort((a, b) => b.at - a.at)
+    // Purga expirados primeiro (TTL 7d).
+    await db.runAsync(
+      'DELETE FROM pending_actions_backup WHERE backed_up_at < ?',
+      now - QUEUE_BACKUP_TTL_MS,
+    )
+    const rows = await db.getAllAsync<{ id: string; backed_up_at: number; action_count: number }>(
+      'SELECT id, backed_up_at, action_count FROM pending_actions_backup ORDER BY backed_up_at DESC',
+    )
+    return rows.map((r) => ({ key: r.id, at: r.backed_up_at, count: r.action_count }))
   } catch {
     return []
+  }
+}
+
+/**
+ * One-shot cleanup das chaves AsyncStorage legacy `fyneex_offline_queue_backup_*`
+ * que ficaram do tempo pré-SQLite. Roda a cada boot até confirmar zero chaves
+ * restantes — após a primeira execução bem-sucedida grava flag pra skip.
+ *
+ * Por que limpar agressivamente: AsyncStorage no Android era exposto via
+ * adb backup / autoBackup quando allowBackup=true (default antigo). Embora
+ * agora desabilitemos o backup, queremos zerar histórico no device pra que
+ * dumps antigos não tenham PII residual.
+ */
+export async function purgeLegacyQueueBackup(): Promise<void> {
+  try {
+    const flag = await AsyncStorage.getItem(QUEUE_BACKUP_LEGACY_CLEAN_FLAG)
+    if (flag === 'true') return
+    const keys = await AsyncStorage.getAllKeys()
+    const legacy = keys.filter((k) => k.startsWith(QUEUE_BACKUP_PREFIX))
+    if (legacy.length > 0) {
+      await AsyncStorage.multiRemove(legacy).catch(() => {})
+    }
+    await AsyncStorage.setItem(QUEUE_BACKUP_LEGACY_CLEAN_FLAG, 'true').catch(() => {})
+  } catch {
+    // best-effort
   }
 }
 
