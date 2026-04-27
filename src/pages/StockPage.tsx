@@ -42,6 +42,20 @@ const FILTERS: { id: FilterId; label: string }[] = [
   { id: 'delivered', label: 'Entregues' },
 ]
 
+// True quando a data do evento ainda não chegou (data string ISO 'YYYY-MM-DD'
+// ou ISO completo). Usado pra mostrar o toggle "Permitir retirada antecipada"
+// só quando faz sentido — durante/depois do evento o gate requireCheckIn é a
+// trava certa.
+function isPreEventDate(eventDate: string | undefined | null): boolean {
+  if (!eventDate) return false
+  // Aceita 'YYYY-MM-DD' ou ISO completo. Compara só por dia (TZ local) pra
+  // evitar quebra com fuso. Se parsing falhar, retorna false (escolha conservadora).
+  const ymd = eventDate.length >= 10 ? eventDate.slice(0, 10) : eventDate
+  const parsed = new Date(`${ymd}T23:59:59`)
+  if (Number.isNaN(parsed.getTime())) return false
+  return parsed.getTime() > Date.now()
+}
+
 export function StockPage() {
   const event = useNavigationStore((s) => s.selectedEvent)!
   const setSelectedEvent = useNavigationStore((s) => s.setSelectedEvent)
@@ -64,6 +78,11 @@ export function StockPage() {
     participant: MobileParticipant
     serverMessage?: string
   } | null>(null)
+  // Per-action override pro gate `requireCheckIn` do servidor. Default false
+  // (gate ativo). Operador habilita só quando precisa entregar kit antes do
+  // dia do evento (ex: dia anterior, conferindo cadastro). Reseta sempre que
+  // um modal abre/fecha pra evitar carregamento entre participantes.
+  const [allowEarlyWithdrawal, setAllowEarlyWithdrawal] = useState(false)
 
   const { toast, show: showToast } = useToast()
   const { data, isLoading, isFetching, isError, refetch } = useParticipants(event.id, { pageSize: 500 })
@@ -188,6 +207,9 @@ export function StockPage() {
         participantId: p.participantId,
         eventId: event.id,
         instanceIndex: p.instanceIndex,
+        // Default: server-side gate requireCheckIn=true (server padrão também).
+        // Quando operador clica "Permitir retirada antecipada", desabilita o gate.
+        requireCheckIn: allowEarlyWithdrawal ? false : undefined,
       })
       const firstErr = res?.kit?.errors?.[0]
       if (firstErr) {
@@ -222,6 +244,7 @@ export function StockPage() {
         instanceIndex: p.instanceIndex,
         allowNoStock: true,
         allowNoStockReason: reason,
+        requireCheckIn: allowEarlyWithdrawal ? false : undefined,
       })
       setForcePrompt(null)
       if (res?.implicitCheckIn) {
@@ -619,9 +642,33 @@ export function StockPage() {
           overrideFields={kitItemsToFields(buildKitItems(modalParticipant, stockByCategory))}
           confirmLabel="Entregar kit"
           confirmIcon={<Icon name="redeem" size={18} color={colors.textPrimary} />}
-          onClose={() => setModalParticipant(null)}
+          onClose={() => { setAllowEarlyWithdrawal(false); setModalParticipant(null) }}
           onConfirm={() => handleWithdraw(modalParticipant)}
           submitting={withdrawMutation.isPending}
+          extraFooter={isPreEventDate(event.date) ? (
+            <Pressable
+              onPress={() => setAllowEarlyWithdrawal((v) => !v)}
+              style={[
+                styles.earlyToggleRow,
+                allowEarlyWithdrawal && styles.earlyToggleRowActive,
+              ]}
+            >
+              <Icon
+                name={allowEarlyWithdrawal ? 'check_box' : 'check_box_outline_blank'}
+                size={20}
+                color={allowEarlyWithdrawal ? colors.accentGreen : colors.textSecondary}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.earlyToggleLabel}>
+                  Permitir retirada antecipada
+                </Text>
+                <Text style={styles.earlyToggleHint}>
+                  Sem exigir check-in (uso pré-evento). Use com critério —
+                  participante poderá faltar e o kit já saiu.
+                </Text>
+              </View>
+            </Pressable>
+          ) : null}
         />
       ) : null}
 
@@ -1656,5 +1703,33 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 4 },
     elevation: 10,
+  },
+  earlyToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.borderMuted,
+    backgroundColor: colors.bgElevated,
+    marginBottom: 12,
+  },
+  earlyToggleRowActive: {
+    borderColor: colors.accentGreen,
+    backgroundColor: colors.accentGreenDim,
+  },
+  earlyToggleLabel: {
+    fontSize: 13,
+    fontWeight: font.weight.bold,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  earlyToggleHint: {
+    fontSize: 11,
+    fontWeight: font.weight.medium,
+    color: colors.textSecondary,
+    lineHeight: 15,
   },
 })

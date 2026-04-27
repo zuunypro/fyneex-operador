@@ -40,6 +40,10 @@ interface ConfirmationModalProps {
   alreadyScanned?: boolean
   alreadyScannedMessage?: string
   alreadyScannedDetail?: string
+  /** Slot opcional renderizado entre os campos e o botão Confirmar.
+   *  Usado pelo StockPage pra expor o toggle "Permitir retirada antecipada"
+   *  apenas em eventos pré-data ou quando faz sentido pro fluxo. */
+  extraFooter?: ReactNode
 }
 
 export function ConfirmationModal({
@@ -62,6 +66,7 @@ export function ConfirmationModal({
   alreadyScannedMessage = 'Este QR já foi escaneado',
   alreadyScannedDetail,
   overrideFields,
+  extraFooter,
 }: ConfirmationModalProps) {
   const showObs = !alreadyScanned && typeof obsText === 'string' && typeof onObsChange === 'function'
 
@@ -175,6 +180,8 @@ export function ConfirmationModal({
                 />
               </>
             ) : null}
+
+            {!alreadyScanned && extraFooter ? extraFooter : null}
 
             {!alreadyScanned && (
               <Pressable

@@ -86,6 +86,16 @@ export interface PendingAction {
   allowNoStock?: boolean
   /** Pareado com allowNoStock=true: o servidor exige motivo (FORCE_REASON_REQUIRED). */
   allowNoStockReason?: string
+  /**
+   * P1-5: gate `requireCheckIn` do servidor. Quando o usuário tenta retirar
+   * kit pós-evento sem ter feito check-in, o servidor bloqueia se este flag
+   * for true (default). UI pode pedir override (false) pra entrega antecipada
+   * autorizada pelo organizador. Persistido no queue offline pra que o replay
+   * envie a MESMA decisão tomada no momento do scan — antes desta migração o
+   * replay sempre defaultava no servidor (true), divergindo do comportamento
+   * online quando o operador escolheu override pré-evento.
+   */
+  requireCheckIn?: boolean
   createdAt: string
   status: 'pending' | 'syncing' | 'synced' | 'failed'
   error?: string
@@ -449,6 +459,10 @@ function rowToAction(r: ActionRow): PendingAction {
     observation: extras.observation,
     allowNoStock: extras.allowNoStock,
     allowNoStockReason: extras.allowNoStockReason,
+    // P1-5: legacy rows criadas antes desta migração não tinham `requireCheckIn`
+    // no data_json; defaulta pra true (matches default do servidor). Replay
+    // dessas rows mantém o comportamento safe.
+    requireCheckIn: extras.requireCheckIn ?? true,
     status: r.status as PendingAction['status'],
     attempts: r.attempts,
     createdAt: r.created_at,
@@ -504,6 +518,7 @@ export async function enqueue(
         observation: entry.observation,
         allowNoStock: entry.allowNoStock,
         allowNoStockReason: entry.allowNoStockReason,
+        requireCheckIn: entry.requireCheckIn,
       }),
       entry.status,
       entry.attempts,
@@ -542,6 +557,7 @@ export async function updateQueueItem(
         observation: merged.observation,
         allowNoStock: merged.allowNoStock,
         allowNoStockReason: merged.allowNoStockReason,
+        requireCheckIn: merged.requireCheckIn,
       }),
       merged.status,
       merged.attempts,
@@ -858,6 +874,7 @@ export async function migrateLegacyAsyncStorage(): Promise<void> {
                 observation: a.observation,
                 allowNoStock: a.allowNoStock,
                 allowNoStockReason: a.allowNoStockReason,
+                requireCheckIn: a.requireCheckIn,
               }),
               a.status,
               a.attempts,

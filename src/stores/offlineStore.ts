@@ -159,6 +159,13 @@ async function callApi(action: PendingAction, signal: AbortSignal): Promise<void
       idempotencyHeaders,
     )
   } else if (action.type === 'withdrawal') {
+    // P1-5 fix: persistir e replayar `requireCheckIn`. Antes desta migração
+    // o replay ignorava o flag e o servidor sempre defaultava `true`. Em
+    // operações pré-evento autorizadas (organizador permitiu retirada
+    // antecipada sem check-in), o item entrava no queue offline com
+    // requireCheckIn=false; ao voltar online, o replay disparava
+    // CHECKIN_REQUIRED e o operador via "falhou — faça login novamente"
+    // (mensagem genérica do path 401/403, errada).
     await apiPost(
       '/api/mobile/checkin',
       {
@@ -168,6 +175,9 @@ async function callApi(action: PendingAction, signal: AbortSignal): Promise<void
         mode: 'withdrawal',
         allowNoStock: action.allowNoStock,
         allowNoStockReason: action.allowNoStockReason,
+        // Default true se ausente — matches default do servidor pra rows
+        // legacy que não tinham o campo no data_json.
+        requireCheckIn: action.requireCheckIn ?? true,
       },
       signal,
       idempotencyHeaders,

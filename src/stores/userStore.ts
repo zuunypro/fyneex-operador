@@ -29,6 +29,8 @@ interface PersistedUser {
   name: string
   email: string
   organizerId?: string
+  role?: 'staff' | 'manager' | 'owner'
+  eventScope?: string[] | null
 }
 
 function pickPersistable(user: User): PersistedUser {
@@ -37,6 +39,8 @@ function pickPersistable(user: User): PersistedUser {
     name: user.name,
     email: user.email,
     organizerId: user.organizerId,
+    role: user.role,
+    eventScope: user.eventScope ?? null,
   }
 }
 
@@ -72,6 +76,12 @@ export async function loadUserFromStorage(): Promise<User | null> {
           email: String(parsed.email ?? ''),
           accessHash: legacyHash,
           organizerId: typeof parsed.organizerId === 'string' ? parsed.organizerId : undefined,
+          role: parsed.role === 'staff' || parsed.role === 'manager' || parsed.role === 'owner'
+            ? parsed.role
+            : undefined,
+          eventScope: Array.isArray(parsed.eventScope)
+            ? (parsed.eventScope.filter((x) => typeof x === 'string') as string[])
+            : null,
         }
         accessHashMirror = legacyHash
         return user
@@ -82,6 +92,12 @@ export async function loadUserFromStorage(): Promise<User | null> {
         email: String(parsed.email ?? ''),
         accessHash: legacyHash,
         organizerId: typeof parsed.organizerId === 'string' ? parsed.organizerId : undefined,
+        role: parsed.role === 'staff' || parsed.role === 'manager' || parsed.role === 'owner'
+          ? parsed.role
+          : undefined,
+        eventScope: Array.isArray(parsed.eventScope)
+          ? (parsed.eventScope.filter((x) => typeof x === 'string') as string[])
+          : null,
       })
       try {
         await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(persisted))
@@ -97,6 +113,8 @@ export async function loadUserFromStorage(): Promise<User | null> {
         email: persisted.email,
         accessHash: legacyHash,
         organizerId: persisted.organizerId,
+        role: persisted.role,
+        eventScope: persisted.eventScope ?? null,
       }
     }
 
@@ -127,6 +145,12 @@ export async function loadUserFromStorage(): Promise<User | null> {
       email: String(parsed.email ?? ''),
       accessHash: hash,
       organizerId: typeof parsed.organizerId === 'string' ? parsed.organizerId : undefined,
+      role: parsed.role === 'staff' || parsed.role === 'manager' || parsed.role === 'owner'
+        ? parsed.role
+        : undefined,
+      eventScope: Array.isArray(parsed.eventScope)
+        ? (parsed.eventScope.filter((x) => typeof x === 'string') as string[])
+        : null,
     }
     accessHashMirror = hash
     return user

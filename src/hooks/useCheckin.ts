@@ -109,13 +109,21 @@ export function useCheckin() {
     },
 
     onError: (err, variables, context) => {
-      const is409 = err instanceof ApiError && err.status === 409
-      if (!is409 && context?.snapshots) {
+      // P1-8 fix: 410 (TICKET_TRANSFERRED, QR_REVOKED) representa estado
+      // server-side em que o ingresso já não vale — não é erro do operador,
+      // é a UI desatualizada. Tratamos igual a 409: NÃO revert do otimismo
+      // (a UI já refletiu "tried"), só invalida pra puxar o estado real.
+      // Sem isso o flash de "checked" voltava pra "pending" + mostrava erro
+      // 410 confuso, e operador recurso desnecessariamente.
+      const apiErr = err instanceof ApiError ? err : null
+      const isAlreadyHandled =
+        apiErr?.status === 409 || apiErr?.status === 410
+      if (!isAlreadyHandled && context?.snapshots) {
         for (const snap of context.snapshots) {
           queryClient.setQueryData(snap.key, snap.data)
         }
       }
-      if (is409) {
+      if (isAlreadyHandled) {
         queryClient.invalidateQueries({
           queryKey: ['mobile', 'participants', variables.eventId],
         })

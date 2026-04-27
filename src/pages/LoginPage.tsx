@@ -29,6 +29,8 @@ interface LoginResponse {
     email: string
     accessHash: string
     organizerId?: string
+    role?: 'staff' | 'manager' | 'owner'
+    eventScope?: string[] | null
   }
 }
 
@@ -56,6 +58,8 @@ export function LoginPage() {
           email: res.user.email,
           accessHash: res.user.accessHash,
           organizerId: res.user.organizerId,
+          role: res.user.role ?? 'manager',
+          eventScope: Array.isArray(res.user.eventScope) ? res.user.eventScope : null,
         }
         // BUG 2 fix: se havia outro usuário logado, limpa a fila pendente antes
         // de escrever a nova sessão. Ações do usuário A não podem vazar pro

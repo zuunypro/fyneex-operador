@@ -14,6 +14,7 @@ import { ApiError } from '@/services/api'
 import { formatEventDateTime } from '@/services/formatters'
 import { useEvents, type MobileEvent } from '@/hooks/useEvents'
 import { useNavigationStore, type EventInfo } from '@/stores/navigationStore'
+import { useUserStore } from '@/stores/userStore'
 import { Icon } from '@/components/Icon'
 
 function toEventInfo(ev: MobileEvent): EventInfo {
@@ -36,6 +37,7 @@ function isLoadableImage(src: string | null | undefined): src is string {
 export function EventSelectorPage() {
   const setSelectedEvent = useNavigationStore((s) => s.setSelectedEvent)
   const logout = useNavigationStore((s) => s.logout)
+  const user = useUserStore((s) => s.user)
   const { data, isLoading, isError, error, refetch, isFetching } = useEvents()
 
   useEffect(() => {
@@ -44,7 +46,18 @@ export function EventSelectorPage() {
     }
   }, [isError, error, logout])
 
-  const events = data?.events || []
+  // Quando o operador é staff com event_scope restrito, filtramos client-side.
+  // Defesa em profundidade — o backend já valida scope no /api/mobile/checkin
+  // (migration 20260841), então mesmo um app desatualizado não consegue
+  // retirar kit ou marcar presença em evento fora do scope. Aqui só evita
+  // mostrar opções inválidas pra UX.
+  const allEvents = data?.events || []
+  const events = (() => {
+    if (!user || user.role !== 'staff') return allEvents
+    if (!Array.isArray(user.eventScope) || user.eventScope.length === 0) return allEvents
+    const allowed = new Set(user.eventScope)
+    return allEvents.filter((ev) => allowed.has(ev.id))
+  })()
 
   return (
     <SafeAreaView style={styles.root}>

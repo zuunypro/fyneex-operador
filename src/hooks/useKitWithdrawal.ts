@@ -11,6 +11,13 @@ interface WithdrawalPayload {
   allowNoStock?: boolean
   /** Justificativa exigida pelo servidor (FORCE_REASON_REQUIRED) quando allowNoStock=true. */
   allowNoStockReason?: string
+  /**
+   * P1-5: gate `requireCheckIn` do servidor. Default true mirrors o servidor.
+   * Quando o organizador permite retirada antecipada (pré-evento) o caller
+   * deve passar false explicitamente. Persistido no queue offline + replayado
+   * no sync — antes desta migração o replay perdia o flag.
+   */
+  requireCheckIn?: boolean
 }
 
 interface WithdrawalResponse {
@@ -62,6 +69,7 @@ export function useKitWithdrawal() {
           instanceIndex: data.instanceIndex,
           allowNoStock: data.allowNoStock,
           allowNoStockReason: data.allowNoStockReason,
+          requireCheckIn: data.requireCheckIn,
         })
         patchParticipantInPacket(data.eventId, data.participantId, data.instanceIndex, {
           kitWithdrawnAt: new Date().toISOString(),
